@@ -1,0 +1,26 @@
+{
+  "name": "gitcolony",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "infra:up": "docker compose up -d postgres redis adminer",
+    "infra:down": "docker compose down",
+    "infra:logs": "docker compose logs -f postgres redis",
+    "db:generate": "bun --filter @gitcolony/api db:generate",
+    "db:push": "bun --filter @gitcolony/api db:push",
+    "db:studio": "bun --filter @gitcolony/api db:studio",
+    "api:dev": "bun --filter @gitcolony/api dev",
+    "worker:dev": "bun --filter @gitcolony/worker dev",
+    "auth:dev": "bun --filter @gitcolony/auth-server dev",
+    "web:dev": "bun --filter @gitcolony/web dev",
+    "typecheck": "bun --filter '*' typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/bun": "latest"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "@gitcolony/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --env-file=../../.env --watch src/index.ts",
+    "start": "bun --env-file=../../.env src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "bun --env-file=../../.env x drizzle-kit generate",
+    "db:push": "bun --env-file=../../.env x drizzle-kit push",
+    "db:studio": "bun --env-file=../../.env x drizzle-kit studio"
+  },
+  "dependencies": {
+    "@gitcolony/schema": "workspace:*",
+    "@gitcolony/crypto": "workspace:*",
+    "@gitcolony/github": "workspace:*",
+    "@gitcolony/core": "workspace:*",
+    "@gitcolony/db": "workspace:*",
+    "@gitcolony/auth": "workspace:*",
+    "@gitcolony/log": "workspace:*",
+    "hono": "^4.6.3",
+    "drizzle-orm": "^0.36.0",
+    "postgres": "^3.4.4",
+    "bullmq": "^5.20.0",
+    "ioredis": "^5.4.1",
+    "zod": "^3.23.8",
+    "nanoid": "^5.0.7"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.28.0"
+  }
+}

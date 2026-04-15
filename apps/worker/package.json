@@ -1,0 +1,24 @@
+{
+  "name": "@gitcolony/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --env-file=../../.env --watch src/index.ts",
+    "start": "bun --env-file=../../.env src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@gitcolony/schema": "workspace:*",
+    "@gitcolony/crypto": "workspace:*",
+    "@gitcolony/github": "workspace:*",
+    "@gitcolony/core": "workspace:*",
+    "@gitcolony/db": "workspace:*",
+    "@gitcolony/llm": "workspace:*",
+    "@gitcolony/log": "workspace:*",
+    "drizzle-orm": "^0.36.0",
+    "postgres": "^3.4.4",
+    "bullmq": "^5.20.0",
+    "ioredis": "^5.4.1"
+  }
+}

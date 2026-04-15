@@ -1,0 +1,21 @@
+{
+  "name": "@gitcolony/auth-server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --env-file=../../.env --watch src/index.ts",
+    "start": "bun --env-file=../../.env src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@gitcolony/auth": "workspace:*",
+    "@gitcolony/crypto": "workspace:*",
+    "@gitcolony/db": "workspace:*",
+    "@gitcolony/github": "workspace:*",
+    "@gitcolony/log": "workspace:*",
+    "@openauthjs/openauth": "^0.4.3",
+    "ioredis": "^5.4.1",
+    "drizzle-orm": "^0.36.0"
+  }
+}

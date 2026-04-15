@@ -1,0 +1,32 @@
+node_modules/
+dist/
+build/
+.svelte-kit/
+.turbo/
+*.log
+
+# private design notes — not for public repo
+docs/
+
+# env
+.env
+.env.local
+.env.*.local
+
+# bun
+bun.lock
+
+# drizzle migrations cache
+drizzle/meta/_journal.json.bak
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+textures/
+.claude/
+CLAUDE.md
