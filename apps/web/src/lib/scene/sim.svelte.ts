@@ -43,15 +43,15 @@ export type {
 const TICK_SECONDS = 0.9;
 const AI_EVERY_NTH = 5;
 const MEET_RADIUS_MANHATTAN = 1;
-// ~54s global gap / ~324s per-pair cooldown at TICK_SECONDS=0.9.
-const MIN_MEETING_GAP_TICKS = 60;
-const MEET_COOLDOWN_TICKS = 360;
+// ~18s global gap / ~108s per-pair cooldown at TICK_SECONDS=0.9.
+const MIN_MEETING_GAP_TICKS = 20;
+const MEET_COOLDOWN_TICKS = 120;
 const CHAT_LOG_MAX = 120;
 const TYPING_MS = 1500;
 const BUBBLE_GAP_MS = 600;
 // Probability a qualifying meeting becomes a code-review exchange instead
 // of a regular greeting. Miss → falls through to MeetingLlmBridge.
-const REVIEW_ROLL_CHANCE = 0.7;
+const REVIEW_ROLL_CHANCE = 0.5;
 
 export interface AgentPose {
   id: string;
