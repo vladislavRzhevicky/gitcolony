@@ -340,3 +340,9 @@ export function simulate(
 
 // Re-export the Agent type so consumers don't need two imports.
 export type { Agent };
+
+// Re-exported so the web layer can compute custom paths (LLM-directed
+// goto / follow intents) without pulling the root barrel, which drags in
+// `node:crypto` via `seed.ts`. The `./sim` subpath stays browser-safe.
+export { aStar } from './roads.js';
+export type { GridMask } from './grid.js';

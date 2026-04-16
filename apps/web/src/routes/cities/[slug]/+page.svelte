@@ -8,10 +8,18 @@
   import { invalidateAll, goto } from '$app/navigation';
   import { Canvas } from '@threlte/core';
   import { Chip, ConfirmDialog } from '$lib/components';
-  import ColonyScene from '$lib/scene/ColonyScene.svelte';
+  import ColonyScene, { type CameraApi, type CameraMode } from '$lib/scene/ColonyScene.svelte';
   import CommitPanel from '$lib/scene/CommitPanel.svelte';
+  import ChatPanel from '$lib/scene/ChatPanel.svelte';
   import Ticker from '$lib/scene/Ticker.svelte';
   import type { Picked } from '$lib/scene/mapping';
+  import {
+    AgentSim,
+    type MeetingFetcher,
+    type MeetingFetchResult,
+    type AgentIntentFetcher,
+    type AgentIntentFetchResult,
+  } from '$lib/scene/sim.svelte';
   import type { JobPhase, JobProgressEvent, World } from '@gitcolony/schema';
   import type { PageData } from './$types';
 
@@ -51,6 +59,50 @@
 
   const isTerminal = $derived(phase === 'done' || phase === 'failed');
 
+  // Client-side simulation. Shared between ColonyScene (which advances it
+  // via useTask) and ChatPanel (which reads its chatLog). Rebuilt whenever
+  // the world identity or the aiEnabled flag changes — sync/regenerate
+  // flows invalidate the page and hand us a fresh world, and toggling an
+  // LLM key rewires the meeting path without needing a manual refresh.
+  //
+  // `fetchMeetingLines` is wired only when the user has an active LLM key
+  // (surfaced by +page.server as `aiEnabled`). Without a key the sim stays
+  // on canned phrases — no wasted round trips, no 412s in the console.
+  const sim = $derived.by(() => {
+    if (!world) return null;
+    const fetchMeetingLines: MeetingFetcher | undefined = data.aiEnabled
+      ? async (input) => {
+          const res = await fetch('/api/ai/greet', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(input),
+          });
+          if (!res.ok) return null;
+          try {
+            return (await res.json()) as MeetingFetchResult;
+          } catch {
+            return null;
+          }
+        }
+      : undefined;
+    const fetchAgentIntent: AgentIntentFetcher | undefined = data.aiEnabled
+      ? async (input) => {
+          const res = await fetch('/api/ai/intent', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(input),
+          });
+          if (!res.ok) return null;
+          try {
+            return (await res.json()) as AgentIntentFetchResult;
+          } catch {
+            return null;
+          }
+        }
+      : undefined;
+    return new AgentSim(world, { fetchMeetingLines, fetchAgentIntent });
+  });
+
   onMount(() => {
     if (world && isTerminal) return;
     es = new EventSource(`/api/cities/${data.slug}/events`);
@@ -86,6 +138,16 @@
   let busy = $state(false);
   let actionError = $state<string | null>(null);
   let confirming = $state<'regenerate' | 'delete' | null>(null);
+
+  // Camera rail state. The api handle is published by ColonyScene once
+  // OrbitControls mounts; until then the rail buttons no-op safely.
+  let cameraApi = $state<CameraApi | null>(null);
+  let cameraMode = $state<CameraMode>('orbit');
+
+  function setCameraMode(mode: CameraMode) {
+    cameraMode = mode;
+    cameraApi?.setMode(mode);
+  }
 
   async function resubscribe() {
     es?.close();
@@ -214,10 +276,18 @@
 
 <div class="stage">
   <!-- Full-bleed 3D canvas ---------------------------------------------- -->
-  {#if world}
+  {#if world && sim}
     <div class="stage__canvas">
       <Canvas>
-        <ColonyScene {world} onPick={(p) => (picked = p)} />
+        <ColonyScene
+          {world}
+          {sim}
+          onPick={(p) => (picked = p)}
+          onReady={(api) => {
+            cameraApi = api;
+            api.setMode(cameraMode);
+          }}
+        />
       </Canvas>
     </div>
   {:else}
@@ -297,19 +367,53 @@
 
   <!-- Floating tool rail (cvRail) --------------------------------------- -->
   <nav class="rail" aria-label="Camera">
-    <button type="button" class="rail__btn" aria-label="Move">
+    <button
+      type="button"
+      class="rail__btn"
+      class:rail__btn--active={cameraMode === 'pan'}
+      aria-label="Pan"
+      aria-pressed={cameraMode === 'pan'}
+      disabled={!cameraApi}
+      onclick={() => setCameraMode('pan')}
+    >
       <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>
     </button>
-    <button type="button" class="rail__btn rail__btn--active" aria-label="Orbit" aria-pressed="true">
+    <button
+      type="button"
+      class="rail__btn"
+      class:rail__btn--active={cameraMode === 'orbit'}
+      aria-label="Orbit"
+      aria-pressed={cameraMode === 'orbit'}
+      disabled={!cameraApi}
+      onclick={() => setCameraMode('orbit')}
+    >
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" d="M20.2 20.2c2.04-2.03.02-7.36-4.5-11.9-4.54-4.52-9.87-6.54-11.9-4.5-2.04 2.03-.02 7.36 4.5 11.9 4.54 4.52 9.87 6.54 11.9 4.5Z"/></svg>
     </button>
-    <button type="button" class="rail__btn" aria-label="Zoom in">
+    <button
+      type="button"
+      class="rail__btn"
+      aria-label="Zoom in"
+      disabled={!cameraApi}
+      onclick={() => cameraApi?.zoomIn()}
+    >
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M21 21l-4.3-4.3M8 11h6M11 8v6"/></svg>
     </button>
-    <button type="button" class="rail__btn" aria-label="Zoom out">
+    <button
+      type="button"
+      class="rail__btn"
+      aria-label="Zoom out"
+      disabled={!cameraApi}
+      onclick={() => cameraApi?.zoomOut()}
+    >
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M21 21l-4.3-4.3M8 11h6"/></svg>
     </button>
-    <button type="button" class="rail__btn" aria-label="Reset camera">
+    <button
+      type="button"
+      class="rail__btn"
+      aria-label="Reset camera"
+      disabled={!cameraApi}
+      onclick={() => cameraApi?.reset()}
+    >
       <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/></svg>
     </button>
   </nav>
@@ -363,6 +467,10 @@
   {#if world}
     <CommitPanel {picked} onClose={() => (picked = null)} />
     <Ticker events={world.ticker ?? []} />
+  {/if}
+
+  {#if sim}
+    <ChatPanel {sim} />
   {/if}
 
   <ConfirmDialog
@@ -526,9 +634,13 @@
       color var(--dur-fast) var(--ease-out),
       background var(--dur-fast) var(--ease-out);
   }
-  .rail__btn:hover {
+  .rail__btn:hover:not(:disabled) {
     color: var(--fg-0);
     background: var(--bg-2);
+  }
+  .rail__btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
   .rail__btn--active {
     background: var(--bg-2);

@@ -14,6 +14,7 @@
 -->
 <script lang="ts">
   import { T, useTask } from '@threlte/core';
+  import { HTML } from '@threlte/extras';
   import { AnimationMixer, type AnimationAction, type AnimationClip, type Object3D } from 'three';
   import type { World, Agent } from '@gitcolony/schema';
   import { agentModel } from './assets';
@@ -41,6 +42,14 @@
   let instanceMap = $state<Map<string, Instance>>(new Map());
 
   const agentsById = $derived(new Map(world.agents.map((a) => [a.id, a])));
+
+  // Reactive id -> emoji lookup so the render loop can tag a single bubble
+  // per agent with O(1) access instead of scanning the array each pose.
+  const emojiById = $derived.by(() => {
+    const m = new Map<string, string>();
+    for (const b of sim.emojiBubbles) m.set(b.id, b.emoji);
+    return m;
+  });
 
   $effect(() => {
     let cancelled = false;
@@ -126,5 +135,86 @@
     >
       <T is={inst.scene} />
     </T.Group>
+    {#if sim.typingIds.has(pose.id)}
+      <!-- Billboard-mounted bubble over the character's head. Positioned in
+           world-space (not inside the scaled Group) so the bubble size stays
+           stable regardless of the agent's model scale. -->
+      <HTML position={[pose.x, 0.95, pose.z]} center sprite pointerEvents="none">
+        <div class="typing-bubble" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
+      </HTML>
+    {:else if emojiById.has(pose.id)}
+      <!-- Ambient emoji bubble. Suppressed when the agent is typing so the
+           two bubble styles never stack on the same head. -->
+      <HTML position={[pose.x, 0.95, pose.z]} center sprite pointerEvents="none">
+        <div class="emoji-bubble" aria-hidden="true">{emojiById.get(pose.id)}</div>
+      </HTML>
+    {/if}
   {/if}
 {/each}
+
+<style>
+  .typing-bubble {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 5px 8px;
+    background: rgba(255, 255, 255, 0.95);
+    border-radius: 10px;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+    transform: translateY(-100%);
+    user-select: none;
+    pointer-events: none;
+  }
+  .typing-bubble::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 4px solid transparent;
+    border-top-color: rgba(255, 255, 255, 0.95);
+  }
+  .typing-bubble span {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: #555;
+    animation: typing-bounce 1.2s infinite ease-in-out;
+  }
+  .typing-bubble span:nth-child(2) { animation-delay: 0.2s; }
+  .typing-bubble span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes typing-bounce {
+    0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+    30% { opacity: 1; transform: translateY(-3px); }
+  }
+
+  .emoji-bubble {
+    display: inline-block;
+    padding: 3px 7px;
+    background: rgba(255, 255, 255, 0.95);
+    border-radius: 12px;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+    transform: translateY(-100%);
+    font-size: 18px;
+    line-height: 1;
+    user-select: none;
+    pointer-events: none;
+    animation: emoji-pop 300ms ease-out;
+  }
+  .emoji-bubble::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 4px solid transparent;
+    border-top-color: rgba(255, 255, 255, 0.95);
+  }
+  @keyframes emoji-pop {
+    0% { opacity: 0; transform: translateY(-100%) scale(0.4); }
+    60% { opacity: 1; transform: translateY(-100%) scale(1.15); }
+    100% { opacity: 1; transform: translateY(-100%) scale(1); }
+  }
+</style>

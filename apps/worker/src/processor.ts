@@ -120,13 +120,51 @@ async function resolveToken(cityId: string): Promise<string> {
 }
 
 // ----------------------------------------------------------------------------
+// LLM config resolver — pulls the user's active LLM key from the DB and
+// decrypts it. Returns null if the user hasn't picked one, which causes
+// the naming/ticker phases to skip (fail-soft contract).
+// ----------------------------------------------------------------------------
+
+async function resolveLlmConfig(userId: string): Promise<LLMConfig | null> {
+  const [user] = await db
+    .select({ activeLlmKeyId: schema.users.activeLlmKeyId })
+    .from(schema.users)
+    .where(eq(schema.users.id, userId))
+    .limit(1);
+  if (!user?.activeLlmKeyId) return null;
+
+  const [key] = await db
+    .select({
+      id: schema.userLlmKeys.id,
+      encryptedApiKey: schema.userLlmKeys.encryptedApiKey,
+      model: schema.userLlmKeys.model,
+    })
+    .from(schema.userLlmKeys)
+    .where(eq(schema.userLlmKeys.id, user.activeLlmKeyId))
+    .limit(1);
+  if (!key) return null;
+
+  // Best-effort usage bookkeeping; never blocks the job on failure.
+  try {
+    await db
+      .update(schema.userLlmKeys)
+      .set({ lastUsedAt: new Date() })
+      .where(eq(schema.userLlmKeys.id, key.id));
+  } catch {
+    // ignored
+  }
+
+  return {
+    apiKey: decryptSecret(key.encryptedApiKey),
+    model: key.model,
+  };
+}
+
+// ----------------------------------------------------------------------------
 // Main processor
 // ----------------------------------------------------------------------------
 
-export async function processGeneration(
-  job: Job<GenerationJobData>,
-  llmConfig: LLMConfig | null,
-) {
+export async function processGeneration(job: Job<GenerationJobData>) {
   const jobId = job.id!;
   const { cityId, mode } = job.data;
   const report = makeReporter(jobId);
@@ -144,6 +182,16 @@ export async function processGeneration(
       .where(eq(schema.cities.id, cityId))
       .limit(1);
     if (!city) throw new Error('city disappeared');
+
+    // Resolve the LLM config from the owning user's active key. Null means
+    // no key is saved/selected — naming/ticker phases then skip cleanly.
+    const llmConfig = await resolveLlmConfig(city.userId);
+    if (!llmConfig) {
+      log.info('no active LLM key for user — LLM phases will skip', {
+        userId: city.userId,
+        cityId,
+      });
+    }
 
     const token = await resolveToken(cityId);
     const [ownerPart, namePart] = city.repoFullName.split('/');
