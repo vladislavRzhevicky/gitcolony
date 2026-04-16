@@ -5,3 +5,4 @@ export { default as ConfirmDialog } from './ConfirmDialog.svelte';
 export { default as Input } from './Input.svelte';
 export { default as NewCityDialog } from './NewCityDialog.svelte';
 export { default as TopBar } from './TopBar.svelte';
+export { default as UserBadge } from './UserBadge.svelte';

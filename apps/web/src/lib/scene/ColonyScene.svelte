@@ -10,9 +10,22 @@
   Picking is funnelled through a single onPick prop so the page-level
   panel doesn't care which layer the click originated from.
 -->
+<script lang="ts" module>
+  export type CameraMode = 'orbit' | 'pan';
+
+  export interface CameraApi {
+    zoomIn(): void;
+    zoomOut(): void;
+    reset(): void;
+    setMode(mode: CameraMode): void;
+  }
+</script>
+
 <script lang="ts">
   import { T, useTask } from '@threlte/core';
   import { OrbitControls } from '@threlte/extras';
+  import { MOUSE } from 'three';
+  import type { OrbitControls as ThreeOrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
   import Buildings from './Buildings.svelte';
   import Roads from './Roads.svelte';
   import Scenery from './Scenery.svelte';
@@ -25,19 +38,20 @@
     type Picked,
     type World,
   } from './mapping';
-  import { AgentSim } from './sim.svelte';
+  import type { AgentSim } from './sim.svelte';
 
   interface Props {
     world: World;
+    // Owned by the page — same instance is passed to ChatPanel so both
+    // render surfaces observe the same chat log and AI roster. ColonyScene
+    // only advances it via useTask (must live inside <Canvas>).
+    sim: AgentSim;
     onPick?: (picked: Picked) => void;
+    onReady?: (api: CameraApi) => void;
   }
 
-  let { world, onPick }: Props = $props();
+  let { world, sim, onPick, onReady }: Props = $props();
 
-  // Client-side simulation. Rebuilt whenever the world identity changes —
-  // sync/regenerate flows invalidate the page and hand us a fresh world,
-  // so this effectively resets the sim on ingestion events.
-  const sim = $derived(new AgentSim(world));
   useTask((delta) => sim.tick(delta));
 
   // City extent — bounding box of every populated district pad, in world
@@ -95,6 +109,57 @@
   const maxDim = $derived(cityBounds.maxDim);
   const camDist = $derived(maxDim * 1.2);
 
+  // Initial camera framing — kept as reactive derivations so the rail's
+  // Reset button can restore the computed default regardless of the
+  // user's current orbit / pan state. Both props feed directly into the
+  // PerspectiveCamera + OrbitControls below.
+  const initialCamPos = $derived<[number, number, number]>([
+    cityBounds.cx + camDist * 0.7,
+    camDist * 0.9,
+    cityBounds.cz + camDist * 0.7,
+  ]);
+  const initialTarget = $derived<[number, number, number]>([
+    cityBounds.cx,
+    0,
+    cityBounds.cz,
+  ]);
+
+  let orbitRef = $state<ThreeOrbitControls | undefined>();
+
+  // Expose the camera API once OrbitControls mounts. The ref is bindable
+  // from Threlte's wrapper; we notify the parent so the floating tool
+  // rail can drive zoom / reset / mouse mode.
+  $effect(() => {
+    if (!orbitRef || !onReady) return;
+    const controls = orbitRef;
+    const dollyBy = (factor: number) => {
+      const cam = controls.object;
+      const offset = cam.position.clone().sub(controls.target);
+      const clamped = Math.max(
+        controls.minDistance,
+        Math.min(controls.maxDistance, offset.length() * factor),
+      );
+      offset.setLength(clamped);
+      cam.position.copy(controls.target).add(offset);
+      controls.update();
+    };
+    onReady({
+      zoomIn: () => dollyBy(1 / 1.2),
+      zoomOut: () => dollyBy(1.2),
+      reset: () => {
+        controls.object.position.set(...initialCamPos);
+        controls.target.set(...initialTarget);
+        controls.update();
+      },
+      setMode: (mode) => {
+        controls.mouseButtons =
+          mode === 'pan'
+            ? { LEFT: MOUSE.PAN, MIDDLE: MOUSE.DOLLY, RIGHT: MOUSE.ROTATE }
+            : { LEFT: MOUSE.ROTATE, MIDDLE: MOUSE.DOLLY, RIGHT: MOUSE.PAN };
+      },
+    });
+  });
+
   // Grow the city platform past cityBounds so its edge hides under the
   // first ring of hex grass — otherwise a ~half-hex strip of sea shows
   // through at the seam. 2 world units ≈ one full hex, safely covers
@@ -135,11 +200,12 @@
 <!-- Camera + controls -->
 <T.PerspectiveCamera
   makeDefault
-  position={[cityBounds.cx + camDist * 0.7, camDist * 0.9, cityBounds.cz + camDist * 0.7]}
+  position={initialCamPos}
   fov={35}
 >
   <OrbitControls
-    target={[cityBounds.cx, 0, cityBounds.cz]}
+    bind:ref={orbitRef}
+    target={initialTarget}
     enableDamping
     maxPolarAngle={Math.PI / 2.1}
     minDistance={maxDim * 0.4}

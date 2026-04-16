@@ -1,11 +1,16 @@
 <!--
   NewCityDialog — modal triggered from the dashboard.
 
-  Lists the viewer's owned GitHub repos (loaded once via /api/me/repos on
-  open) with search-by-name. Picking a row that already has a colony
-  navigates to it; otherwise it kicks off generation. The Advanced section
-  preserves the manual "owner/name + PAT" path for repos outside the list
-  (orgs, private with PAT, etc.) — same submit handler as before.
+  Lists every repo the caller can reach, merged across three sources:
+    - the OAuth session (`/api/me/repos`, GET),
+    - each saved token the user manages on /settings (`/api/me/repos` POST
+      with `{ tokenId }`).
+  Tokens load automatically on open — the user does not paste or configure
+  anything here. Managing tokens themselves happens on /settings.
+
+  Picking a row that already has a colony navigates to it; otherwise it
+  kicks off generation, forwarding the matching `tokenId` when the row
+  originated from a saved token so access checks pass.
 -->
 <script lang="ts">
   import { goto } from '$app/navigation';
@@ -16,21 +21,16 @@
 
   // Per-row source tag. Decides what (if anything) we attach to POST
   // /cities when the user picks this row:
-  //   - oauth   → use the session token (no extra field)
-  //   - token   → saved user_tokens row; send `{ tokenId }`
-  //   - inline  → unsaved PAT typed into the input; send `{ pat }`
+  //   - oauth → use the session token (no extra field)
+  //   - token → saved user_tokens row; send `{ tokenId }`
   type Row =
     | (OwnedRepo & { source: 'oauth' })
-    | (OwnedRepo & { source: 'token'; tokenId: string })
-    | (OwnedRepo & { source: 'inline' });
+    | (OwnedRepo & { source: 'token'; tokenId: string });
 
   interface SavedToken {
     id: string;
     label: string;
     ownerLogin: string;
-    scopes: string[] | null;
-    createdAt: string;
-    lastUsedAt: string | null;
   }
 
   interface Props {
@@ -40,38 +40,29 @@
 
   let { open, onClose }: Props = $props();
 
-  // Repo list state. Lazy-loaded — the request only fires the first time
-  // the dialog opens. Subsequent opens reuse the in-memory list (and the
-  // browser's HTTP cache too, since the proxy forwards cache-control).
+  // Repo list state. Lazy-loaded — requests only fire the first time the
+  // dialog opens. Subsequent opens reuse the in-memory list.
   let repos = $state<Row[]>([]);
   let loading = $state(false);
   let listError = $state<string | null>(null);
   let loaded = $state(false);
 
+  // Number of saved tokens still fetching their repos. We show a footer
+  // hint while non-zero so the user knows the list is still growing.
+  let tokenLoads = $state(0);
+
   let query = $state('');
 
-  // Submission state — shared between list-pick and the manual Advanced form.
+  // Submission state — one at a time, keyed to the specific fullName so
+  // only the clicked row shows its "starting…" label.
   let submitting = $state(false);
   let submittingFullName = $state<string | null>(null);
   let formError = $state<string | null>(null);
 
-  // Advanced (PAT) state.
-  let showAdvanced = $state(false);
-  let pat = $state('');
-  let patLabel = $state('');
-  let loadingFromPat = $state(false);
-  let savingPat = $state(false);
-
-  // Saved tokens — fetched on dialog open. Keyed state so the UI can show
-  // per-row loading / delete spinners without a parent-wide flag.
-  let savedTokens = $state<SavedToken[]>([]);
-  let tokensLoading = $state(false);
-  let tokensError = $state<string | null>(null);
-  let tokenBusyId = $state<string | null>(null);
-
-  // Merge rows into the list, deduping by fullName. Caller is expected to
-  // drop rows from the same source first when it wants replace-semantics
-  // (e.g. re-running an inline PAT).
+  // Merge rows into the list, deduping by fullName. First source to
+  // resolve a given repo wins — later merges skip it. This keeps the
+  // OAuth row priority and avoids duplicates when an org repo is
+  // reachable via both the session and a saved token.
   function mergeRepos(next: Row[]) {
     const seen = new Set(repos.map((r) => r.fullName));
     const additions: Row[] = [];
@@ -80,23 +71,22 @@
       seen.add(r.fullName);
       additions.push(r);
     }
-    repos = [...repos, ...additions];
+    if (additions.length > 0) repos = [...repos, ...additions];
   }
 
-  async function loadRepos() {
-    if (loaded || loading) return;
+  async function loadOauthRepos() {
     loading = true;
     listError = null;
     try {
       const res = await fetch('/api/me/repos');
       const data = await res.json();
       if (!res.ok) {
-        listError = typeof data.error === 'string' ? data.error : 'failed to load repositories';
+        listError =
+          typeof data.error === 'string' ? data.error : 'failed to load repositories';
         return;
       }
       const fetched = (data.repos ?? []) as OwnedRepo[];
       mergeRepos(fetched.map((r) => ({ ...r, source: 'oauth' as const })));
-      loaded = true;
     } catch (err) {
       listError = err instanceof Error ? err.message : 'unexpected error';
     } finally {
@@ -104,52 +94,11 @@
     }
   }
 
-  // Fetch repos reachable by an inline PAT typed into the form.
-  // Triggered by the explicit "Load repos from this token" button — no
-  // auto-debounce. Replaces any prior `source: 'inline'` rows so the
-  // list always reflects the currently-typed token.
-  async function loadReposFromPat() {
-    const token = pat.trim();
-    if (!token) {
-      listError = 'enter a token above first';
-      return;
-    }
-    if (loadingFromPat) return;
-    loadingFromPat = true;
-    listError = null;
-    try {
-      const res = await fetch('/api/me/repos', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ pat: token }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        listError = typeof data.error === 'string' ? data.error : 'failed to load repositories';
-        return;
-      }
-      repos = repos.filter((r) => r.source !== 'inline');
-      const fetched = (data.repos ?? []) as OwnedRepo[];
-      mergeRepos(fetched.map((r) => ({ ...r, source: 'inline' as const })));
-      loaded = true;
-      if (fetched.length === 0) {
-        listError =
-          'token is valid but GitHub returned 0 repositories — for fine-grained tokens on an org, ask the org owner to approve the token in GitHub → Organization settings → Personal access tokens';
-      }
-    } catch (err) {
-      listError = err instanceof Error ? err.message : 'unexpected error';
-    } finally {
-      loadingFromPat = false;
-    }
-  }
-
-  // Fetch repos reachable by a stored user_tokens row. Server decrypts
-  // the PAT and forwards to GitHub. Rows land in the list with the
-  // token id attached so pickRepo can forward `tokenId` later.
-  async function loadReposFromSaved(tokenId: string) {
-    if (tokenBusyId) return;
-    tokenBusyId = tokenId;
-    listError = null;
+  // Resolve repos reachable by a saved token. Errors from one token are
+  // non-fatal — surface a low-key inline message but keep going so a
+  // single revoked token doesn't hide repos from the others.
+  async function loadReposFromToken(tokenId: string) {
+    tokenLoads++;
     try {
       const res = await fetch('/api/me/repos', {
         method: 'POST',
@@ -157,135 +106,50 @@
         body: JSON.stringify({ tokenId }),
       });
       const data = await res.json();
-      if (!res.ok) {
-        listError = typeof data.error === 'string' ? data.error : 'failed to load repositories';
-        return;
-      }
-      // Replace rows for this specific saved token, keep others.
-      repos = repos.filter(
-        (r) => !(r.source === 'token' && r.tokenId === tokenId),
-      );
+      if (!res.ok) return; // silent per-token fail — other tokens still merge
       const fetched = (data.repos ?? []) as OwnedRepo[];
       mergeRepos(
         fetched.map((r) => ({ ...r, source: 'token' as const, tokenId })),
       );
-      loaded = true;
-      if (fetched.length === 0) {
-        listError =
-          'saved token returned 0 repositories — the org may need to approve it, or its repo access may have changed';
-      }
-    } catch (err) {
-      listError = err instanceof Error ? err.message : 'unexpected error';
+    } catch {
+      // same reasoning — don't let a network blip blank the dialog.
     } finally {
-      tokenBusyId = null;
+      tokenLoads--;
     }
   }
 
-  async function loadSavedTokens() {
-    if (tokensLoading) return;
-    tokensLoading = true;
-    tokensError = null;
+  // Full load sequence: OAuth first (fastest, the common case), then
+  // fan out across every saved token in parallel so their repos fold
+  // in as each request returns.
+  async function loadAll() {
+    if (loaded || loading) return;
+    await loadOauthRepos();
     try {
       const res = await fetch('/api/me/tokens');
-      const data = await res.json();
-      if (!res.ok) {
-        tokensError = typeof data.error === 'string' ? data.error : 'failed to load tokens';
-        return;
+      if (res.ok) {
+        const body = await res.json();
+        const saved = (body.tokens ?? []) as SavedToken[];
+        await Promise.all(saved.map((t) => loadReposFromToken(t.id)));
       }
-      savedTokens = (data.tokens ?? []) as SavedToken[];
-    } catch (err) {
-      tokensError = err instanceof Error ? err.message : 'unexpected error';
-    } finally {
-      tokensLoading = false;
+    } catch {
+      // saved-tokens lookup is best-effort — oauth repos are already in.
     }
-  }
-
-  async function saveCurrentPat() {
-    const token = pat.trim();
-    const label = patLabel.trim();
-    if (!token) {
-      listError = 'enter a token above first';
-      return;
-    }
-    if (!label) {
-      listError = 'give the token a label (e.g. "work account")';
-      return;
-    }
-    if (savingPat) return;
-    savingPat = true;
-    listError = null;
-    try {
-      const res = await fetch('/api/me/tokens', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ label, pat: token }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        const msg =
-          typeof data.error === 'string'
-            ? data.error
-            : 'could not save token';
-        listError = msg;
-        return;
-      }
-      const created = data.token as { id: string; label: string; ownerLogin: string };
-      // Clear the input — the saved entry takes over visually.
-      pat = '';
-      patLabel = '';
-      // Convert existing inline rows (same PAT just saved) into token rows
-      // so they persist across reloads without needing to refetch.
-      repos = repos.map((r) =>
-        r.source === 'inline'
-          ? { ...r, source: 'token' as const, tokenId: created.id }
-          : r,
-      );
-      await loadSavedTokens();
-    } catch (err) {
-      listError = err instanceof Error ? err.message : 'unexpected error';
-    } finally {
-      savingPat = false;
-    }
-  }
-
-  async function deleteSavedToken(tokenId: string) {
-    if (tokenBusyId) return;
-    tokenBusyId = tokenId;
-    try {
-      const res = await fetch(`/api/me/tokens/${tokenId}`, { method: 'DELETE' });
-      if (!res.ok && res.status !== 204) {
-        tokensError = `delete failed: ${res.status}`;
-        return;
-      }
-      savedTokens = savedTokens.filter((t) => t.id !== tokenId);
-      // Drop repo rows tied to that token — without it we can't submit them.
-      repos = repos.filter(
-        (r) => !(r.source === 'token' && r.tokenId === tokenId),
-      );
-    } catch (err) {
-      tokensError = err instanceof Error ? err.message : 'unexpected error';
-    } finally {
-      tokenBusyId = null;
-    }
+    loaded = true;
   }
 
   // Trigger a load only on the open=false→true edge. A naive
-  // `$effect(() => { if (open) loadRepos() })` would re-run whenever any
-  // $state read inside loadRepos (loading, loaded, repos) changed — and
-  // on a failed fetch that means an infinite retry loop. The edge guard
-  // breaks that cycle; manual retry is a separate button.
+  // `$effect(() => { if (open) loadAll() })` would re-run whenever any
+  // $state read inside loadAll (loading, loaded, repos) changed — and
+  // on a failed fetch that means an infinite retry loop.
   let prevOpen = false;
   $effect(() => {
-    if (open && !prevOpen) {
-      loadRepos();
-      loadSavedTokens();
-    }
+    if (open && !prevOpen) loadAll();
     prevOpen = open;
   });
 
-  // Filtered list. Search matches case-insensitive substring on full name
-  // OR description. Forks / archived repos are shown as-is — the list is
-  // already scoped to the user's own repos via /me/repos.
+  // Filtered list. Case-insensitive substring match on full name OR
+  // description. We don't hide forks/archived — the list is already
+  // tightly scoped by affiliation + saved-token access.
   const filtered = $derived.by(() => {
     const q = query.trim().toLowerCase();
     if (q.length === 0) return repos;
@@ -298,7 +162,7 @@
 
   async function generate(
     repoFullName: string,
-    opts: { pat?: string; tokenId?: string } = {},
+    opts: { tokenId?: string } = {},
   ) {
     if (submitting) return;
     submitting = true;
@@ -310,7 +174,6 @@
         visibility: 'unlisted',
       };
       if (opts.tokenId) body.tokenId = opts.tokenId;
-      else if (opts.pat && opts.pat.length > 0) body.pat = opts.pat;
       const res = await fetch('/api/cities', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -319,17 +182,19 @@
       const data = await res.json();
       if (!res.ok) {
         // 409: a colony already exists for this repo (race with the join).
-        // Refetch and navigate to it instead of surfacing the error.
+        // Refresh and navigate to it instead of surfacing the error.
         if (res.status === 409) {
           loaded = false;
-          await loadRepos();
+          repos = [];
+          await loadAll();
           const found = repos.find((r) => r.fullName === repoFullName);
           if (found?.existingSlug) {
             await goto(`/cities/${found.existingSlug}`);
             return;
           }
         }
-        formError = typeof data.error === 'string' ? data.error : 'could not start generation';
+        formError =
+          typeof data.error === 'string' ? data.error : 'could not start generation';
         return;
       }
       await goto(`/cities/${data.slug}`);
@@ -348,8 +213,6 @@
     }
     if (r.source === 'token') {
       await generate(r.fullName, { tokenId: r.tokenId });
-    } else if (r.source === 'inline') {
-      await generate(r.fullName, { pat: pat.trim() });
     } else {
       await generate(r.fullName);
     }
@@ -358,8 +221,6 @@
   function onKey(e: KeyboardEvent) {
     if (e.key === 'Escape') onClose();
   }
-
-  // relativeTime lives in $lib/time so the dashboard can reuse it.
 </script>
 
 <svelte:window onkeydown={onKey} />
@@ -376,8 +237,9 @@
       <header class="panel__head">
         <h2 id="ncd-title" class="panel__title">Generate a colony</h2>
         <p class="panel__sub">
-          Pick a repository you own. Already-generated colonies open instead
-          of regenerating.
+          Pick a repository. Already-generated colonies open instead of
+          regenerating.
+          <a class="panel__link" href="/settings">Manage access tokens →</a>
         </p>
       </header>
 
@@ -391,19 +253,27 @@
       </div>
 
       <div class="list" role="listbox" aria-label="Your repositories">
-        {#if loading && !loaded}
+        {#if loading && repos.length === 0}
           <p class="list__empty mono">loading repositories…</p>
-        {:else if listError}
+        {:else if listError && repos.length === 0}
           <div class="list__empty">
             <p class="err" role="alert">{listError}</p>
-            <button type="button" class="toggle" onclick={() => { loaded = false; loadRepos(); }}>
+            <button
+              type="button"
+              class="toggle"
+              onclick={() => {
+                loaded = false;
+                repos = [];
+                loadAll();
+              }}
+            >
               retry
             </button>
           </div>
         {:else if filtered.length === 0}
           <p class="list__empty">
             {repos.length === 0
-              ? 'no owned repositories found.'
+              ? 'no repositories found.'
               : 'no matches — try clearing the search.'}
           </p>
         {:else}
@@ -421,6 +291,7 @@
                   {#if r.isPrivate}<span class="badge">private</span>{/if}
                   {#if r.isFork}<span class="badge">fork</span>{/if}
                   {#if r.isArchived}<span class="badge">archived</span>{/if}
+                  {#if r.source === 'token'}<span class="badge">via token</span>{/if}
                   {#if r.primaryLanguage}
                     <span class="dim">{r.primaryLanguage}</span>
                   {/if}
@@ -449,143 +320,8 @@
         {/if}
       </div>
 
-      <button
-        type="button"
-        class="toggle"
-        onclick={() => (showAdvanced = !showAdvanced)}
-      >
-        {showAdvanced ? 'Hide' : 'Show'} advanced (use a personal access token)
-      </button>
-
-      {#if showAdvanced}
-        <div class="manual">
-          <div class="pat-field">
-            <Input
-              label="Personal access token (optional)"
-              placeholder="ghp_…  — only needed for private repos"
-              type="password"
-              name="pat"
-              bind:value={pat}
-            />
-            <span
-              class="help"
-              tabindex="0"
-              role="button"
-              aria-label="How to create a token"
-            >
-              ?
-              <span class="help__tip" role="tooltip">
-                <strong>Create a fine-grained GitHub token</strong>
-                <ol>
-                  <li>
-                    Open
-                    <a
-                      href="https://github.com/settings/personal-access-tokens/new"
-                      target="_blank"
-                      rel="noreferrer noopener"
-                    >
-                      github.com/settings/personal-access-tokens/new
-                    </a>
-                  </li>
-                  <li>
-                    <em>Repository access</em> → <em>Only select repositories</em> →
-                    pick the repo you want to import.
-                  </li>
-                  <li>
-                    <em>Repository permissions</em> →
-                    <code>Contents: Read-only</code>,
-                    <code>Metadata: Read-only</code>.
-                  </li>
-                  <li>Generate, copy the <code>github_pat_…</code> value, paste above.</li>
-                </ol>
-                <p class="help__note">
-                  Classic tokens work too — scope <code>repo</code> is enough.
-                  Tokens are stored encrypted and only used to read commits.
-                </p>
-              </span>
-            </span>
-          </div>
-          <div class="pat-label">
-            <Input
-              label="Label (required to save)"
-              placeholder="e.g. work account, bitstarz org"
-              name="pat-label"
-              bind:value={patLabel}
-            />
-          </div>
-          <div class="manual__actions">
-            <button
-              type="button"
-              class="toggle"
-              onclick={loadReposFromPat}
-              disabled={loadingFromPat || pat.trim().length === 0}
-            >
-              {loadingFromPat
-                ? 'loading…'
-                : repos.some((r) => r.source === 'inline')
-                  ? 'reload repositories'
-                  : 'load repositories'}
-            </button>
-            <button
-              type="button"
-              class="toggle"
-              onclick={saveCurrentPat}
-              disabled={savingPat || pat.trim().length === 0 || patLabel.trim().length === 0}
-            >
-              {savingPat ? 'saving…' : 'save token'}
-            </button>
-            <span class="manual__hint-text">
-              save to reuse later without pasting again
-            </span>
-          </div>
-        </div>
-
-        <div class="saved">
-          <div class="saved__head">
-            <h3 class="saved__title">Saved tokens</h3>
-            {#if tokensLoading}
-              <span class="dim">loading…</span>
-            {/if}
-          </div>
-          {#if tokensError}
-            <p class="err" role="alert">{tokensError}</p>
-          {/if}
-          {#if !tokensLoading && savedTokens.length === 0 && !tokensError}
-            <p class="saved__empty">
-              no saved tokens yet — paste one above and click <em>save token</em>.
-            </p>
-          {/if}
-          {#each savedTokens as t (t.id)}
-            <div class="saved__row">
-              <div class="saved__main">
-                <span class="saved__label">{t.label}</span>
-                <span class="saved__meta mono">
-                  @{t.ownerLogin}
-                  {#if t.lastUsedAt}· used {relativeTime(t.lastUsedAt)}{/if}
-                </span>
-              </div>
-              <div class="saved__actions">
-                <button
-                  type="button"
-                  class="toggle"
-                  onclick={() => loadReposFromSaved(t.id)}
-                  disabled={tokenBusyId !== null}
-                >
-                  {tokenBusyId === t.id ? 'loading…' : 'load repos'}
-                </button>
-                <button
-                  type="button"
-                  class="toggle toggle--danger"
-                  onclick={() => deleteSavedToken(t.id)}
-                  disabled={tokenBusyId !== null}
-                  aria-label="delete token"
-                >
-                  delete
-                </button>
-              </div>
-            </div>
-          {/each}
-        </div>
+      {#if tokenLoads > 0}
+        <p class="hint mono">loading repositories from saved tokens…</p>
       {/if}
 
       {#if formError}
@@ -640,6 +376,14 @@
     color: var(--fg-1);
     line-height: 1.5;
   }
+  .panel__link {
+    color: var(--accent);
+    text-decoration: none;
+    margin-left: var(--space-2);
+  }
+  .panel__link:hover {
+    text-decoration: underline;
+  }
   .panel__actions {
     display: flex;
     justify-content: flex-end;
@@ -681,10 +425,19 @@
     font-family: var(--font-ui);
     transition: background-color var(--dur-base, 150ms) var(--ease-out);
   }
-  .row:last-child { border-bottom: none; }
-  .row:hover:not(:disabled) { background: var(--bg-1); }
-  .row:disabled { cursor: progress; opacity: 0.6; }
-  .row--existing .row__cta { color: var(--accent); }
+  .row:last-child {
+    border-bottom: none;
+  }
+  .row:hover:not(:disabled) {
+    background: var(--bg-1);
+  }
+  .row:disabled {
+    cursor: progress;
+    opacity: 0.6;
+  }
+  .row--existing .row__cta {
+    color: var(--accent);
+  }
   .row__main {
     display: flex;
     flex-direction: column;
@@ -728,8 +481,17 @@
     font-size: 11px;
     color: var(--fg-1);
   }
-  .dim { color: var(--fg-1); }
-  .mono { font-family: var(--font-mono); }
+  .dim {
+    color: var(--fg-1);
+  }
+  .mono {
+    font-family: var(--font-mono);
+  }
+  .hint {
+    margin: 0;
+    color: var(--fg-1);
+    font-size: var(--fs-xs);
+  }
   .toggle {
     background: transparent;
     border: none;
@@ -740,170 +502,9 @@
     align-self: flex-start;
     padding: 0;
   }
-  .manual {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-  }
   .err {
     color: var(--danger, #d04f4f);
     font-size: var(--fs-sm);
     margin: 0;
-  }
-  .pat-field {
-    position: relative;
-  }
-  .manual__actions {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    flex-wrap: wrap;
-  }
-  .manual__hint-text {
-    font-size: var(--fs-xs, 12px);
-    color: var(--fg-1);
-  }
-  .toggle:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .toggle--danger {
-    color: var(--danger, #d04f4f);
-  }
-  .saved {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    padding-top: var(--space-2);
-    border-top: var(--stroke-w) solid var(--stroke);
-  }
-  .saved__head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: var(--space-2);
-  }
-  .saved__title {
-    margin: 0;
-    font-family: var(--font-ui);
-    font-size: var(--fs-sm);
-    font-weight: var(--fw-semibold);
-    color: var(--fg-0);
-  }
-  .saved__empty {
-    margin: 0;
-    font-size: var(--fs-sm);
-    color: var(--fg-1);
-  }
-  .saved__row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    border: var(--stroke-w) solid var(--stroke);
-    border-radius: var(--radius-md);
-    background: var(--bg-0);
-  }
-  .saved__main {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-width: 0;
-  }
-  .saved__label {
-    font-size: var(--fs-md);
-    color: var(--fg-0);
-  }
-  .saved__meta {
-    font-size: var(--fs-xs, 12px);
-    color: var(--fg-1);
-  }
-  .saved__actions {
-    display: flex;
-    gap: var(--space-3);
-  }
-  .help {
-    position: absolute;
-    top: 2px;
-    right: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    border: var(--stroke-w) solid var(--stroke);
-    color: var(--fg-1);
-    font-size: 11px;
-    font-family: var(--font-ui);
-    line-height: 1;
-    cursor: help;
-    user-select: none;
-    transition: color var(--dur-fast) var(--ease-out),
-      border-color var(--dur-fast) var(--ease-out);
-  }
-  .help:hover,
-  .help:focus-visible {
-    color: var(--accent);
-    border-color: var(--accent);
-    outline: none;
-  }
-  .help__tip {
-    position: absolute;
-    bottom: calc(100% + 8px);
-    right: -8px;
-    z-index: 10;
-    width: 320px;
-    padding: var(--space-3);
-    background: var(--bg-2);
-    border: var(--stroke-w) solid var(--stroke);
-    border-radius: var(--radius-md);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-    color: var(--fg-0);
-    font-size: var(--fs-sm);
-    font-family: var(--font-ui);
-    line-height: 1.5;
-    opacity: 0;
-    pointer-events: none;
-    transform: translateY(4px);
-    transition: opacity var(--dur-fast) var(--ease-out),
-      transform var(--dur-fast) var(--ease-out);
-    cursor: auto;
-  }
-  .help:hover .help__tip,
-  .help:focus-visible .help__tip,
-  .help__tip:hover {
-    opacity: 1;
-    pointer-events: auto;
-    transform: translateY(0);
-  }
-  .help__tip strong {
-    display: block;
-    margin-bottom: var(--space-2);
-    font-weight: var(--fw-semibold);
-  }
-  .help__tip ol {
-    margin: 0;
-    padding-left: 1.2em;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .help__tip a {
-    color: var(--accent);
-    word-break: break-all;
-  }
-  .help__tip code {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    background: var(--bg-0);
-    padding: 1px 5px;
-    border-radius: 4px;
-  }
-  .help__note {
-    margin: var(--space-2) 0 0;
-    color: var(--fg-1);
-    font-size: var(--fs-xs, 12px);
   }
 </style>

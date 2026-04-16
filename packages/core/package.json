@@ -11,7 +11,8 @@
     "./world-gen": "./src/world-gen.ts",
     "./seed": "./src/seed.ts",
     "./rng": "./src/rng.ts",
-    "./sim": "./src/sim.ts"
+    "./sim": "./src/sim.ts",
+    "./names": "./src/names.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",

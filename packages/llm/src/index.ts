@@ -1,4 +1,9 @@
-export { type LLMConfig, getModel } from './gemini.js';
+export {
+  type LLMConfig,
+  type GeminiModel,
+  getModel,
+  listGeminiModels,
+} from './gemini.js';
 export {
   generateNames,
   type NameInput,
@@ -16,3 +21,18 @@ export {
   type TickerAgentInput,
   type TickerObjectInput,
 } from './ticker.js';
+export {
+  generateMeetingLines,
+  type MeetingAgent,
+  type MeetingContext,
+  type MeetingLines,
+} from './chatter.js';
+export {
+  pickAgentIntent,
+  AgentIntentSchema,
+  type AgentIntent,
+  type DirectorAgent,
+  type DirectorDistrict,
+  type DirectorPeer,
+  type DirectorInput,
+} from './director.js';

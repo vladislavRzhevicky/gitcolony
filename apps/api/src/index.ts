@@ -6,6 +6,8 @@ import { citiesRoute } from './routes/cities.js';
 import { jobsRoute } from './routes/jobs.js';
 import { tokensRoute } from './routes/tokens.js';
 import { meRoute } from './routes/me.js';
+import { llmKeysRoute } from './routes/llm-keys.js';
+import { aiRoute } from './routes/ai.js';
 
 const app = new Hono();
 
@@ -24,6 +26,8 @@ app.route('/cities', citiesRoute);
 app.route('/jobs', jobsRoute);
 app.route('/tokens', tokensRoute);
 app.route('/me', meRoute);
+app.route('/llm-keys', llmKeysRoute);
+app.route('/ai', aiRoute);
 
 app.onError((err, c) => {
   log.error('api request failed', err, {

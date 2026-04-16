@@ -38,8 +38,34 @@ export const users = pgTable('users', {
   // jobs created via the public tab (no PAT involved).
   encryptedOauthToken: text('encrypted_oauth_token'),
   oauthTokenUpdatedAt: timestamp('oauth_token_updated_at', { withTimezone: true }),
+  // Points at the user_llm_keys row used for LLM director phases. Null =
+  // no key selected → naming/ticker phases are skipped. Deliberately NOT a
+  // FK to avoid a circular reference; deletes clear this column in app code.
+  activeLlmKeyId: uuid('active_llm_key_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 });
+
+// Encrypted LLM API keys (Gemini today, other providers later). Every user
+// can save multiple keys and pick one as "active" — the worker reads the
+// active key at job time, so there's no process-wide env dependency.
+export const userLlmKeys = pgTable(
+  'user_llm_keys',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .references(() => users.id, { onDelete: 'cascade' })
+      .notNull(),
+    label: text('label').notNull(),
+    provider: text('provider').notNull().default('gemini'),
+    model: text('model').notNull(), // e.g. 'gemini-2.5-flash-lite'
+    encryptedApiKey: text('encrypted_api_key').notNull(), // AES-GCM envelope
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+  },
+  (t) => ({
+    byUser: index('user_llm_keys_user_idx').on(t.userId),
+  }),
+);
 
 // Extra PATs for accessing repos outside of the OAuth session
 // (e.g. work GitHub account, orgs). Encrypted at application layer.

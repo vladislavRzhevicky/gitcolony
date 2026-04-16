@@ -9,7 +9,7 @@
 -->
 <script lang="ts">
   import { invalidateAll } from '$app/navigation';
-  import { Button, Card, Chip, NewCityDialog, TopBar } from '$lib/components';
+  import { Button, Card, Chip, NewCityDialog, TopBar, UserBadge } from '$lib/components';
   import { relativeTime } from '$lib/time';
   import type { PageData } from './$types';
 
@@ -66,9 +66,14 @@
 
 <TopBar>
   {#snippet right()}
-    <span class="user">@{data.user?.githubLogin ?? 'anonymous'}</span>
+    <UserBadge login={data.user?.githubLogin} />
+    <a class="icon-btn" href="/settings" aria-label="Settings" data-tip="Settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    </a>
     <form method="POST" action="/auth/logout" class="signout">
-      <Button variant="ghost" type="submit">Sign out</Button>
+      <button type="submit" class="icon-btn" aria-label="Sign out" data-tip="Sign out">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+      </button>
     </form>
   {/snippet}
 </TopBar>
@@ -183,13 +188,58 @@
 <NewCityDialog open={dialogOpen} onClose={() => (dialogOpen = false)} />
 
 <style>
-  .user {
-    font-family: var(--font-mono);
-    font-size: var(--fs-md);
-    color: var(--fg-0);
-  }
   .signout {
     margin: 0;
+  }
+  /* Icon-only controls in the top-bar. `data-tip` gives an instant
+     tooltip below the icon — the native title attribute has a ~1s
+     browser delay that feels broken for these small actions. */
+  .icon-btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--radius-md);
+    background: transparent;
+    border: none;
+    color: var(--fg-1);
+    cursor: pointer;
+    transition:
+      color var(--dur-fast) var(--ease-out),
+      background var(--dur-fast) var(--ease-out);
+  }
+  .icon-btn:hover {
+    color: var(--fg-0);
+    background: var(--bg-2);
+  }
+  .icon-btn svg {
+    width: 18px;
+    height: 18px;
+  }
+  .icon-btn[data-tip]::after {
+    content: attr(data-tip);
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 4px 8px;
+    background: var(--bg-2);
+    border: var(--stroke-w) solid var(--stroke);
+    border-radius: var(--radius-md);
+    font-family: var(--font-ui);
+    font-size: var(--fs-xs);
+    color: var(--fg-0);
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--dur-fast) var(--ease-out);
+    z-index: 20;
+  }
+  .icon-btn[data-tip]:hover::after,
+  .icon-btn[data-tip]:focus-visible::after {
+    opacity: 1;
   }
 
   .dash {

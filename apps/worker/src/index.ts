@@ -1,23 +1,14 @@
 import { Worker } from 'bullmq';
 import { eq } from 'drizzle-orm';
 import { db, schema } from '@gitcolony/db';
-import type { LLMConfig } from '@gitcolony/llm';
 import { log } from '@gitcolony/log';
 import { connection, QUEUE_GENERATION, type GenerationJobData } from './queue.js';
 import { processGeneration } from './processor.js';
 
-// Resolved once at startup so each job doesn't re-read env. `null` means the
-// LLM director is disabled — pipeline still runs, ticker stays empty,
-// displayName/tagline/personality remain unset on world objects.
-const llmConfig: LLMConfig | null = process.env.GEMINI_API_KEY
-  ? {
-      apiKey: process.env.GEMINI_API_KEY,
-      model: process.env.GEMINI_MODEL ?? 'gemini-2.5-flash-lite',
-    }
-  : null;
-if (!llmConfig) {
-  log.warn('GEMINI_API_KEY not set — LLM director phases will be skipped');
-}
+// LLM config is resolved per-job from the owning user's active key in the
+// DB (see processor.resolveLlmConfig). The worker itself holds no
+// LLM-related state, so credentials can be rotated through the UI without
+// restarting the process.
 
 const worker = new Worker<GenerationJobData>(
   QUEUE_GENERATION,
@@ -34,7 +25,7 @@ const worker = new Worker<GenerationJobData>(
       .set({ status: 'running' })
       .where(eq(schema.generationJobs.id, jobId));
 
-    await processGeneration(job, llmConfig);
+    await processGeneration(job);
   },
   {
     connection,
