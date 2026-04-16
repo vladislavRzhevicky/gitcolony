@@ -72,6 +72,10 @@
     width: 100%;
     color: var(--fg-0);
     font-size: var(--fs-base);
+    /* Focus is communicated by the outer .input__field:focus-within
+       border — the native outline on the inner <input> would stack a
+       second ring on top of it. */
+    outline: none;
   }
   .input__control::placeholder {
     color: var(--fg-1);

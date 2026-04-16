@@ -48,15 +48,25 @@
     const populated = new Set<string>();
     for (const o of world.objects) populated.add(o.districtId);
     for (const a of world.agents) populated.add(a.districtId);
+    // Outskirts only counts if populated (keeps empty repos compact).
+    // Graveyard always counts so the memorial district is visible even in
+    // repos with zero reverts yet — the pad itself reads as a place.
     const relevant = world.districts.filter(
-      (d) => !d.isOutskirts || populated.has(d.id),
+      (d) => (!d.isOutskirts && !d.isGraveyard) || populated.has(d.id) || d.isGraveyard,
     );
     let minX = Infinity;
     let maxX = -Infinity;
     let minZ = Infinity;
     let maxZ = -Infinity;
     for (const d of relevant) {
-      const c = tileToWorld(d.center, world.grid, 0);
+      // Match the pad placement: compute the bbox rectangle instead of
+      // treating the center tile's center as the pad midpoint. For even
+      // districtSize the two differ by half a tile.
+      const hw = Math.floor(d.sizeInTiles.w / 2);
+      const hh = Math.floor(d.sizeInTiles.h / 2);
+      const bboxCx = d.center.x - hw + (d.sizeInTiles.w - 1) / 2;
+      const bboxCy = d.center.y - hh + (d.sizeInTiles.h - 1) / 2;
+      const c = tileToWorld({ x: bboxCx, y: bboxCy }, world.grid, 0);
       const halfW = (d.sizeInTiles.w / 2) * TILE_SIZE;
       const halfD = (d.sizeInTiles.h / 2) * TILE_SIZE;
       if (c.x - halfW < minX) minX = c.x - halfW;
@@ -94,15 +104,29 @@
   // Pre-compute district bounds once per world change. Invariant #2:
   // districts are immutable on sync, so this stays stable between
   // ingestion events.
+  //
+  // The pad is positioned against the district's bbox rectangle rather than
+  // the center tile. For odd districtSize these two coincide; for even
+  // districtSize the tile-center is offset half a tile from the bbox center
+  // (because `districtBBox` anchors with `floor(W/2)`), so using the tile
+  // center here would bleed the pad half a tile onto the adjacent road.
   const districtPads = $derived(
     world.districts.map((d) => {
-      const center = tileToWorld(d.center, world.grid, 0.02);
+      const hw = Math.floor(d.sizeInTiles.w / 2);
+      const hh = Math.floor(d.sizeInTiles.h / 2);
+      const bboxCx = d.center.x - hw + (d.sizeInTiles.w - 1) / 2;
+      const bboxCy = d.center.y - hh + (d.sizeInTiles.h - 1) / 2;
+      const center = tileToWorld({ x: bboxCx, y: bboxCy }, world.grid, 0.02);
       return {
         id: d.id,
         center,
         width: d.sizeInTiles.w * TILE_SIZE,
         depth: d.sizeInTiles.h * TILE_SIZE,
-        color: d.isOutskirts ? COLORS.outskirtsGround : COLORS.districtGround,
+        color: d.isGraveyard
+          ? COLORS.graveyardGround
+          : d.isOutskirts
+            ? COLORS.outskirtsGround
+            : COLORS.districtGround,
       };
     }),
   );

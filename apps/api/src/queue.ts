@@ -1,5 +1,6 @@
 import { Queue } from 'bullmq';
 import IORedis from 'ioredis';
+import { db, schema } from '@gitcolony/db';
 
 const redisUrl = process.env.REDIS_URL;
 if (!redisUrl) throw new Error('REDIS_URL is not set');
@@ -50,5 +51,11 @@ export type GenerationMode = GenerationJobData['mode'];
 
 export async function enqueueGeneration(cityId: string, mode: GenerationMode) {
   const jobId = crypto.randomUUID();
+  // Insert the DB row up-front so an SSE subscriber that connects between the
+  // enqueue and the worker's pickup doesn't see the previous job and close
+  // the stream. The worker's insert is onConflictDoNothing, so this is safe.
+  await db
+    .insert(schema.generationJobs)
+    .values({ id: jobId, cityId, status: 'queued', phase: 'queued', progress: 0 });
   return generationQueue.add(mode, { cityId, mode }, { jobId });
 }

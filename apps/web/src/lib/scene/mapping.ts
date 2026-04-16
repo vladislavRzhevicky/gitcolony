@@ -59,6 +59,9 @@ export const COLORS = {
   groundDark: '#3f5a2c', // retained for legacy; currently unused, safe to remove later.
   districtGround: '#5c9c79',
   outskirtsGround: '#45785e',
+  // Graveyard district pad — cooler, desaturated so tombstones read
+  // against it and the memorial quarter feels distinct from living land.
+  graveyardGround: '#4a5560',
 } as const;
 
 // Picked selection — uniform shape so the page-level handler doesn't care

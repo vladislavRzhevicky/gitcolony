@@ -38,12 +38,22 @@ jobsRoute.get('/:id/stream', (c) => {
   const id = c.req.param('id');
   const redisUrl = process.env.REDIS_URL!;
   return streamSSE(c, async (stream) => {
+    // Long retry — suppress EventSource auto-reconnect after an intentional
+    // close (done/failed). Otherwise the browser keeps spamming
+    // ERR_INCOMPLETE_CHUNKED_ENCODING and cycling through tiny snapshots.
+    const RETRY_MS = 24 * 60 * 60 * 1000;
+
     const sub = new IORedis(redisUrl, { maxRetriesPerRequest: null });
     let closed = false;
+    let hb: ReturnType<typeof setInterval> | null = null;
 
     const cleanup = async () => {
       if (closed) return;
       closed = true;
+      if (hb) {
+        clearInterval(hb);
+        hb = null;
+      }
       try {
         await sub.unsubscribe();
       } catch {}
@@ -65,7 +75,11 @@ jobsRoute.get('/:id/stream', (c) => {
         message: row.message ?? undefined,
         error: row.error ?? undefined,
       };
-      await stream.writeSSE({ event: 'progress', data: JSON.stringify(snapshot) });
+      await stream.writeSSE({
+        event: 'progress',
+        data: JSON.stringify(snapshot),
+        retry: RETRY_MS,
+      });
       if (row.status === 'done' || row.status === 'failed') {
         await cleanup();
         return;
@@ -74,6 +88,7 @@ jobsRoute.get('/:id/stream', (c) => {
 
     await sub.subscribe(jobChannel(id));
     sub.on('message', async (_ch, payload) => {
+      if (closed) return;
       await stream.writeSSE({ event: 'progress', data: payload });
       try {
         const evt = JSON.parse(payload) as JobProgressEvent;
@@ -85,10 +100,10 @@ jobsRoute.get('/:id/stream', (c) => {
     });
 
     // Keep the stream open; heartbeat prevents proxies from timing out.
-    const hb = setInterval(() => {
+    hb = setInterval(() => {
+      if (closed) return;
       stream.writeSSE({ event: 'ping', data: '' }).catch(() => {});
     }, 15_000);
-    stream.onAbort(() => clearInterval(hb));
 
     // Block on close.
     await new Promise<void>((resolve) => {

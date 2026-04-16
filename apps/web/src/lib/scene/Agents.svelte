@@ -54,8 +54,10 @@
           templateExtent(url),
         ]);
         // Mini Characters ship roughly human-sized in their native units;
-        // we target ~0.9 world units tall to sit nicely on TILE_SIZE=1.
-        const scale = extent.y > 0 ? 0.9 / extent.y : 1;
+        // we target ~0.46 world units tall (0.6 / 1.3) so characters read
+        // as villagers on TILE_SIZE=1 alongside the 1.5×-scaled buildings
+        // instead of competing with them for visual weight.
+        const scale = extent.y > 0 ? 0.46 / extent.y : 1;
 
         let mixer: AnimationMixer | null = null;
         let action: AnimationAction | null = null;

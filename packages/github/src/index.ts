@@ -1,5 +1,5 @@
 import { graphql } from '@octokit/graphql';
-import type { Commit, RepoData } from '@gitcolony/schema';
+import type { ClosedPullRequest, Commit, RepoData } from '@gitcolony/schema';
 
 // ============================================================================
 // Token handling
@@ -82,6 +82,37 @@ export async function checkOwnership(
       repoOwner: owner,
       reason: 'private_inaccessible',
     };
+  }
+}
+
+// Lightweight access check used on the explicit-token branch of POST /cities.
+// We don't care who owns the repo — only whether the token can see it. One
+// GraphQL call, no viewer lookup. `not_found` collapses "private repo the
+// token can't reach" into the same bucket as "repo doesn't exist" on purpose:
+// GitHub returns both indistinguishably for unauth'd access.
+export interface RepoAccessCheck {
+  canRead: boolean;
+  reason?: 'not_found' | 'error';
+}
+
+export async function checkRepoAccess(
+  token: string,
+  owner: string,
+  name: string,
+): Promise<RepoAccessCheck> {
+  try {
+    const res = await client(token)<{
+      repository: { owner: { login: string } } | null;
+    }>(
+      `query($owner: String!, $name: String!) {
+         repository(owner: $owner, name: $name) { owner { login } }
+       }`,
+      { owner, name },
+    );
+    if (!res.repository) return { canRead: false, reason: 'not_found' };
+    return { canRead: true };
+  } catch {
+    return { canRead: false, reason: 'error' };
   }
 }
 
@@ -193,6 +224,78 @@ export async function listAccessibleRepos(
   return out;
 }
 
+/**
+ * REST-based repo listing. Used for PAT flows because GitHub's GraphQL
+ * `viewer.repositories` has a long-standing bug with fine-grained PATs:
+ * it omits org-owned repos even when the token has explicit access and
+ * the org has approved the token. REST `/user/repos` is the documented
+ * workaround — it returns the union of owner / collaborator / org-member
+ * repos the token can read, including the ones GraphQL misses.
+ *
+ * Downside vs. GraphQL: no `defaultBranchRef` in the basic listing, so
+ * we fill it from `default_branch` which is always present.
+ */
+export async function listReposViaRest(
+  token: string,
+  { limit = 200 }: { limit?: number } = {},
+): Promise<RepoSummary[]> {
+  const out: RepoSummary[] = [];
+  let page = 1;
+  const perPage = 100;
+  while (out.length < limit) {
+    const url =
+      `https://api.github.com/user/repos` +
+      `?per_page=${perPage}&page=${page}` +
+      `&affiliation=owner,collaborator,organization_member` +
+      `&sort=pushed`;
+    const res = await fetch(url, {
+      headers: {
+        authorization: `bearer ${token}`,
+        accept: 'application/vnd.github+json',
+        'x-github-api-version': '2022-11-28',
+      },
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`GitHub REST /user/repos ${res.status}: ${text.slice(0, 200)}`);
+    }
+    const rows = (await res.json()) as Array<{
+      full_name: string;
+      name: string;
+      owner: { login: string };
+      private: boolean;
+      fork: boolean;
+      archived: boolean;
+      default_branch: string | null;
+      description: string | null;
+      pushed_at: string | null;
+      stargazers_count: number;
+      language: string | null;
+    }>;
+    if (rows.length === 0) break;
+    for (const r of rows) {
+      if (!r.default_branch) continue;
+      out.push({
+        fullName: r.full_name,
+        name: r.name,
+        owner: r.owner.login,
+        isPrivate: r.private,
+        isFork: r.fork,
+        isArchived: r.archived,
+        defaultBranch: r.default_branch,
+        description: r.description,
+        pushedAt: r.pushed_at,
+        stargazerCount: r.stargazers_count,
+        primaryLanguage: r.language,
+      });
+      if (out.length >= limit) break;
+    }
+    if (rows.length < perPage) break;
+    page += 1;
+  }
+  return out;
+}
+
 // ============================================================================
 // Commit history ingestion
 // ============================================================================
@@ -236,11 +339,17 @@ export async function fetchCommits(
   const limit = opts.maxCommits ?? Number(process.env.INITIAL_COMMIT_LIMIT ?? 1000);
   const gql = client(token);
 
-  // Resolve default branch + basic meta in one roundtrip
+  // Resolve default branch + basic meta in one roundtrip. Also pulls
+  // `history.totalCount` on the default branch so callers know the repo's
+  // real commit volume even when we cap ingestion — world-gen uses this to
+  // size cities to the repo's scale rather than the fetched window.
   const meta = await gql<{
     repository: {
       createdAt: string;
-      defaultBranchRef: { name: string } | null;
+      defaultBranchRef: {
+        name: string;
+        target: { history: { totalCount: number } } | null;
+      } | null;
       owner: { login: string };
       name: string;
     } | null;
@@ -248,7 +357,10 @@ export async function fetchCommits(
     `query($owner: String!, $name: String!) {
        repository(owner: $owner, name: $name) {
          createdAt
-         defaultBranchRef { name }
+         defaultBranchRef {
+           name
+           target { ... on Commit { history(first: 0) { totalCount } } }
+         }
          owner { login }
          name
        }
@@ -258,6 +370,8 @@ export async function fetchCommits(
   if (!meta.repository) throw new Error(`repository not found: ${opts.owner}/${opts.name}`);
   const branch = opts.branch ?? meta.repository.defaultBranchRef?.name;
   if (!branch) throw new Error('repository has no default branch');
+  const totalCommits =
+    meta.repository.defaultBranchRef?.target?.history.totalCount ?? undefined;
 
   const commits: Commit[] = [];
   let cursor: string | null = null;
@@ -327,7 +441,171 @@ export async function fetchCommits(
       fullName: `${meta.repository.owner.login}/${meta.repository.name}`,
       defaultBranch: branch,
       repoCreatedAt: meta.repository.createdAt,
+      totalCommits,
     },
     commits,
   };
+}
+
+// ============================================================================
+// File enrichment
+//
+// GraphQL's `history.nodes` doesn't expose per-commit changed file paths —
+// the only way to get them via GitHub's API is REST `/repos/:o/:n/commits/:sha`.
+// World-gen relies on file paths to subdivide districts: without them the
+// fallback (conventional-commit scope / semantic type) can only produce
+// ~6–7 buckets regardless of repo size. For big monorepos that collapses
+// the city to a handful of quartiers.
+//
+// We call REST with bounded concurrency after fetchCommits so the caller
+// can feed file-aware commits into the ranker. Rate-limit budget: 5k/hour
+// for a PAT — default cap of 800 enriched commits keeps a single sync at
+// ~16 % of budget, leaving room for retries and other API calls.
+// ============================================================================
+
+export interface EnrichCommitFilesOptions {
+  owner: string;
+  name: string;
+  shas: readonly string[];
+  concurrency?: number;
+  onProgress?: (done: number, total: number) => void;
+}
+
+export async function enrichCommitFiles(
+  token: string,
+  { owner, name, shas, concurrency = 8, onProgress }: EnrichCommitFilesOptions,
+): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  if (shas.length === 0) return out;
+  let idx = 0;
+  let done = 0;
+  const worker = async () => {
+    while (true) {
+      const i = idx++;
+      if (i >= shas.length) break;
+      const sha = shas[i]!;
+      try {
+        const res = await fetch(
+          `https://api.github.com/repos/${owner}/${name}/commits/${sha}`,
+          {
+            headers: {
+              authorization: `bearer ${token}`,
+              accept: 'application/vnd.github+json',
+              'x-github-api-version': '2022-11-28',
+            },
+          },
+        );
+        if (res.ok) {
+          const data = (await res.json()) as {
+            files?: Array<{ filename: string }>;
+          };
+          out.set(sha, (data.files ?? []).map((f) => f.filename));
+        } else {
+          // Non-OK (rate limit, not found, etc.) — skip silently. The caller
+          // falls back to the conventional-commit scope for those commits.
+          out.set(sha, []);
+        }
+      } catch {
+        out.set(sha, []);
+      }
+      done++;
+      onProgress?.(done, shas.length);
+    }
+  };
+  const n = Math.min(concurrency, shas.length);
+  await Promise.all(Array.from({ length: n }, () => worker()));
+  return out;
+}
+
+// ============================================================================
+// Closed pull requests
+//
+// We fetch PRs that were closed WITHOUT being merged — merged ones are
+// already represented by their merge commits in fetchCommits above, so they
+// don't need a separate grave. The `states: [CLOSED]` filter lumps both
+// together, and we drop `mergedAt != null` client-side.
+//
+// Paginates newest-closed-first and stops at `untilClosedAt` for incremental
+// sync (the worker passes the previous sync's high-water mark).
+// ============================================================================
+
+export interface FetchClosedPullRequestsOptions {
+  owner: string;
+  name: string;
+  maxPrs?: number;
+  // Stop once we see a PR that was closed at or before this timestamp.
+  untilClosedAt?: string;
+}
+
+interface RawPrNode {
+  number: number;
+  title: string;
+  closedAt: string | null;
+  mergedAt: string | null;
+  author: { login: string } | null;
+  headRefOid: string | null;
+}
+
+export async function fetchClosedPullRequests(
+  token: string,
+  opts: FetchClosedPullRequestsOptions,
+): Promise<ClosedPullRequest[]> {
+  const limit = opts.maxPrs ?? Number(process.env.INITIAL_PR_LIMIT ?? 500);
+  const gql = client(token);
+  const out: ClosedPullRequest[] = [];
+  let cursor: string | null = null;
+  const stopAt = opts.untilClosedAt ? new Date(opts.untilClosedAt).getTime() : null;
+
+  type Page = {
+    repository: {
+      pullRequests: {
+        pageInfo: { hasNextPage: boolean; endCursor: string | null };
+        nodes: RawPrNode[];
+      };
+    } | null;
+  };
+
+  outer: while (out.length < limit) {
+    const page: Page = await gql(
+      `query($owner: String!, $name: String!, $cursor: String) {
+         repository(owner: $owner, name: $name) {
+           pullRequests(
+             first: 100,
+             after: $cursor,
+             states: [CLOSED],
+             orderBy: { field: UPDATED_AT, direction: DESC }
+           ) {
+             pageInfo { hasNextPage endCursor }
+             nodes {
+               number title closedAt mergedAt
+               author { login }
+               headRefOid
+             }
+           }
+         }
+       }`,
+      { owner: opts.owner, name: opts.name, cursor },
+    );
+    if (!page.repository) break;
+    const pr = page.repository.pullRequests;
+    for (const n of pr.nodes) {
+      // Skip merged — their footprint is already the merge commit in world-gen.
+      if (n.mergedAt) continue;
+      // Defensive: CLOSED state should always carry closedAt, but the GraphQL
+      // contract marks it nullable. No closedAt means we can't stably sort it.
+      if (!n.closedAt) continue;
+      if (stopAt !== null && new Date(n.closedAt).getTime() <= stopAt) break outer;
+      out.push({
+        prNumber: n.number,
+        title: n.title,
+        authorLogin: n.author?.login ?? null,
+        closedAt: n.closedAt,
+        headSha: n.headRefOid,
+      });
+      if (out.length >= limit) break outer;
+    }
+    if (!pr.pageInfo.hasNextPage) break;
+    cursor = pr.pageInfo.endCursor;
+  }
+  return out;
 }

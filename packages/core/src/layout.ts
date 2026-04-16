@@ -16,6 +16,45 @@ import type { GridSize } from './grid.js';
 
 export type Topology = 'single' | 'line' | 'ring' | 'cluster';
 
+// ----------------------------------------------------------------------------
+// Grid packing helper — picks (cols, rows) that fill a rectangle tightly
+// for a given count. Used both by `arrangeCity` (to lay out districts) and by
+// the geometry pass in world-gen (to size the grid before layout runs).
+// ----------------------------------------------------------------------------
+
+/**
+ * Factor district count into (cols, rows) that fill the rectangle tightly.
+ * Prefers an exact divisor pair when one exists within a reasonable aspect
+ * ratio; otherwise picks the near-square layout that minimizes empty cells.
+ */
+export function packDistricts(n: number): { cols: number; rows: number } {
+  if (n <= 0) return { cols: 1, rows: 1 };
+  const target = Math.sqrt(n);
+  // Prefer an exact factorization close to square.
+  let exact: { cols: number; rows: number } | null = null;
+  for (let c = 1; c <= n; c++) {
+    if (n % c !== 0) continue;
+    const r = n / c;
+    if (Math.max(c, r) / Math.min(c, r) > 2.5) continue;
+    if (!exact || Math.abs(c - target) < Math.abs(exact.cols - target)) {
+      exact = { cols: c, rows: r };
+    }
+  }
+  if (exact) return exact;
+  // No clean factorization — fall back to ceil(sqrt) and accept trailing
+  // empty cells, but pick the (cols, rows) pair that wastes the fewest.
+  let best: { cols: number; rows: number; waste: number; ratio: number } | null = null;
+  for (let cols = Math.max(1, Math.floor(target)); cols <= Math.ceil(target) + 1; cols++) {
+    const rows = Math.ceil(n / cols);
+    const waste = rows * cols - n;
+    const ratio = Math.max(cols, rows) / Math.min(cols, rows);
+    if (!best || waste < best.waste || (waste === best.waste && ratio < best.ratio)) {
+      best = { cols, rows, waste, ratio };
+    }
+  }
+  return { cols: best!.cols, rows: best!.rows };
+}
+
 export interface ProximityGraph {
   /** Adjacency: name -> neighbor -> co-touch commit count. Symmetric. */
   edges: Map<string, Map<string, number>>;
@@ -316,6 +355,7 @@ export function layoutDistricts({
     id: 'd-outskirts',
     name: 'outskirts',
     isOutskirts: true,
+    isGraveyard: false,
     center: { x: Math.ceil(districtSize.w / 2), y: Math.ceil(districtSize.h / 2) },
     sizeInTiles: districtSize,
     theme: DISTRICT_THEME,
@@ -355,6 +395,7 @@ export function layoutDistricts({
       id: `d-${slugify(name)}`,
       name,
       isOutskirts: false,
+      isGraveyard: false,
       center: { x: Math.round(p.x), y: Math.round(p.y) },
       sizeInTiles: districtSize,
       theme: DISTRICT_THEME,
@@ -381,9 +422,14 @@ export interface ArrangementInput {
   ranked: readonly RankedCommit[];
   grid: GridSize;
   districtSize: GridSize;
-  pathDepth?: number;
   /** Tiles between adjacent district pads — these become the road grid. */
   roadWidth?: number;
+  /**
+   * Whether to carve out a dedicated graveyard district. Off when the repo
+   * has no closed-unmerged PRs — no point budgeting a memorial pad with
+   * nothing to memorialize.
+   */
+  includeGraveyard?: boolean;
 }
 
 export interface Arrangement {
@@ -396,23 +442,32 @@ export function arrangeCity({
   ranked,
   grid,
   districtSize,
-  pathDepth = 1,
   roadWidth = 1,
+  includeGraveyard = true,
 }: ArrangementInput): Arrangement {
-  // Collect the district names — same logic as the legacy layout, just so
-  // we end up with one district per primaryPath plus the outskirts fallback.
-  const graph = buildProximityGraph(ranked, pathDepth);
+  // primaryPath is authoritative: world-gen's adaptive subdivision already
+  // chose the right per-commit depth, so we don't need a proximity-graph
+  // enrichment pass here (it would pollute the set with co-touched dirs at
+  // a single fixed depth that no longer matches what world-gen assigned).
   const names = new Set<string>();
   for (const c of ranked) if (c.primaryPath) names.add(c.primaryPath);
-  for (const d of graph.weight.keys()) names.add(d);
   const sortedNames = Array.from(names).sort();
 
-  // Outskirts is always present and sits in the last cell of the grid so it
-  // tends to land at a corner — visually distinct without special-casing.
-  const cellNames = [...sortedNames, '__outskirts__'];
+  // Outskirts is always present (invariant #3); graveyard only when the
+  // caller asks for it — typically when there's at least one closed-unmerged
+  // PR to memorialize. Both get tacked on at the end so they tend to land in
+  // corners without special-casing.
+  const cellNames = [
+    ...sortedNames,
+    '__outskirts__',
+    ...(includeGraveyard ? ['__graveyard__'] : []),
+  ];
   const n = cellNames.length;
-  const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
-  const rows = Math.max(1, Math.ceil(n / cols));
+  // packDistricts picks a near-square (cols, rows) with an exact divisor pair
+  // when one exists, minimizing trailing empty cells. Without this a prime-ish
+  // count (like 7 districts) would leave 2 empty slots sticking out of the
+  // last row and the city would read as half-collapsed.
+  const { cols, rows } = packDistricts(n);
 
   const cellW = districtSize.w + roadWidth;
   const cellH = districtSize.h + roadWidth;
@@ -433,14 +488,31 @@ export function arrangeCity({
       x: x0 + Math.floor(districtSize.w / 2),
       y: y0 + Math.floor(districtSize.h / 2),
     };
-    const isOutskirts = cellNames[i] === '__outskirts__';
+    const cellName = cellNames[i]!;
+    const isOutskirts = cellName === '__outskirts__';
+    const isGraveyard = cellName === '__graveyard__';
+    let id: string;
+    let name: string;
+    let theme = 'generic';
+    if (isOutskirts) {
+      id = 'd-outskirts';
+      name = 'outskirts';
+    } else if (isGraveyard) {
+      id = 'd-graveyard';
+      name = 'graveyard';
+      theme = 'graveyard';
+    } else {
+      id = `d-${slugify(cellName)}`;
+      name = cellName;
+    }
     districts.push({
-      id: isOutskirts ? 'd-outskirts' : `d-${slugify(cellNames[i]!)}`,
-      name: isOutskirts ? 'outskirts' : cellNames[i]!,
+      id,
+      name,
       isOutskirts,
+      isGraveyard,
       center,
       sizeInTiles: districtSize,
-      theme: 'generic',
+      theme,
     });
   }
 

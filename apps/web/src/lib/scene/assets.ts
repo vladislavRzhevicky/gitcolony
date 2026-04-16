@@ -65,23 +65,22 @@ const LOW_DETAIL = [
 //
 // Prefixes not listed fall through to the 'unknown' pool.
 const BUILDING_POOL_BY_PREFIX: Record<string, readonly string[]> = {
-  // semanticType 'feat' produces workshop-* and house-* (house is the generic
-  // residential fallback). Both get the suburban pool.
+  // Primary contract with world-gen (volume-unlocked kits).
+  suburban: SUBURBAN,
+  commercial: [...COMMERCIAL, ...COMMERCIAL_SKYSCRAPERS],
+  industrial: INDUSTRIAL,
+
+  // Legacy prefixes — retained so worlds generated before the kit refactor
+  // still render. Semantic-driven naming is deprecated; new variants always
+  // use a kit prefix.
   workshop: SUBURBAN,
-  // semanticType 'fix' → industrial look (factories, repair yards).
   clinic: INDUSTRIAL,
   repair: INDUSTRIAL,
-  // semanticType 'refactor' → commercial halls / skyscrapers. Mix both so
-  // refactor-heavy repos grow downtowns rather than a wall of identical halls.
   hall: [...COMMERCIAL, ...COMMERCIAL_SKYSCRAPERS],
-  // semanticType 'docs' → cozier suburban buildings.
   library: SUBURBAN,
   archive: SUBURBAN,
-  // semanticType 'test' → industrial plants / tanks.
   tower: INDUSTRIAL,
-  // semanticType 'chore' → background / low-detail row.
   storage: LOW_DETAIL,
-  // 'unknown' fallback in world-gen picks 'house-*'.
   house: SUBURBAN,
 };
 
@@ -128,6 +127,34 @@ const CRATES = [
   '/models/props/car/cone.glb',
 ];
 
+// City Kit Roads construction sub-kit — barrier / cone / light props that
+// mark work-in-progress commits (future: open pull requests) as small
+// construction sites scattered among the regular districts.
+const CONSTRUCTION = [
+  '/models/props/construction/construction-barrier.glb',
+  '/models/props/construction/construction-cone.glb',
+  '/models/props/construction/construction-light.glb',
+];
+
+// Graveyard Kit — tombstones, crosses, coffins. Used by the memorial
+// district for revert commits (and closed-unmerged PRs once the ingestion
+// pipeline supplies them).
+const GRAVES = [
+  '/models/props/graveyard/gravestone-bevel.glb',
+  '/models/props/graveyard/gravestone-broken.glb',
+  '/models/props/graveyard/gravestone-cross.glb',
+  '/models/props/graveyard/gravestone-cross-large.glb',
+  '/models/props/graveyard/gravestone-debris.glb',
+  '/models/props/graveyard/gravestone-decorative.glb',
+  '/models/props/graveyard/gravestone-round.glb',
+  '/models/props/graveyard/gravestone-wide.glb',
+  '/models/props/graveyard/gravestone-roof.glb',
+  '/models/props/graveyard/grave.glb',
+  '/models/props/graveyard/grave-border.glb',
+  '/models/props/graveyard/coffin.glb',
+  '/models/props/graveyard/cross-wood.glb',
+];
+
 export interface DecorModel {
   path: string;
   // Suggested Y offset in world units — some assets (tufts, flowers) sit
@@ -159,6 +186,10 @@ export function decorModel(obj: WorldObject): DecorModel | null {
       return { path: pickFrom(LAMPS, key), yOffset: 0, scale: 0.5 };
     case 'crate':
       return { path: pickFrom(CRATES, key), yOffset: 0, scale: 0.4 };
+    case 'grave':
+      return { path: pickFrom(GRAVES, key), yOffset: 0, scale: 0.7 };
+    case 'construction':
+      return { path: pickFrom(CONSTRUCTION, key), yOffset: 0, scale: 0.55 };
     default:
       return null;
   }
@@ -169,8 +200,39 @@ export function decorModel(obj: WorldObject): DecorModel | null {
 // is stable ('tree-x-y') so we hash that to keep the species consistent
 // across renders.
 // ----------------------------------------------------------------------------
+const GRASS_TUFT_POOL = [
+  '/models/nature/grass.glb',
+  '/models/nature/grass_large.glb',
+  '/models/nature/grass_leafs.glb',
+  '/models/nature/grass_leafsLarge.glb',
+];
+
+const FLOWER_POOL = [
+  '/models/nature/flower_purpleA.glb',
+  '/models/nature/flower_redA.glb',
+  '/models/nature/flower_yellowA.glb',
+];
+
+// Graveyard corner markers — cross-column pillar on each bbox corner.
+const CROSS_COLUMN_PATH = '/models/props/graveyard/cross-column.glb';
+
 export function sceneryModel(prop: SceneryProp): DecorModel {
-  return { path: pickFrom(TREES, prop.id), yOffset: 0, scale: 0.55 };
+  if (prop.variant === 'cross-column') {
+    return { path: CROSS_COLUMN_PATH, yOffset: 0, scale: 1 };
+  }
+  const prefix = prop.variant.split('-')[0] ?? 'tree';
+  switch (prefix) {
+    case 'grass':
+      // grass-tuft / grass-tuft-large / grass-leafs all draw from the same
+      // Kenney grass pool; variant subtype is cosmetic noise so the field
+      // doesn't read as a regular tiling.
+      return { path: pickFrom(GRASS_TUFT_POOL, prop.id), yOffset: 0, scale: 0.7 };
+    case 'flower':
+      return { path: pickFrom(FLOWER_POOL, prop.id), yOffset: 0, scale: 0.8 };
+    case 'tree':
+    default:
+      return { path: pickFrom(TREES, prop.id), yOffset: 0, scale: 0.55 };
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -182,7 +244,10 @@ const CHARACTERS = (['female', 'male'] as const).flatMap((sex) =>
   ['a','b','c','d','e','f'].map((l) => `/models/characters/character-${sex}-${l}.glb`),
 );
 
+const GHOST_PATH = '/models/props/graveyard/character-ghost.glb';
+
 export function agentModel(agent: Agent): string {
+  if (agent.role === 'ghost') return GHOST_PATH;
   return pickFrom(CHARACTERS, agent.id);
 }
 
