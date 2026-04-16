@@ -22,15 +22,17 @@
 </script>
 
 <script lang="ts">
-  import { T, useTask } from '@threlte/core';
+  import { T, useTask, useThrelte } from '@threlte/core';
   import { OrbitControls } from '@threlte/extras';
-  import { MOUSE } from 'three';
+  import { ACESFilmicToneMapping, Color, MOUSE } from 'three';
   import type { OrbitControls as ThreeOrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
   import Buildings from './Buildings.svelte';
   import Roads from './Roads.svelte';
   import Scenery from './Scenery.svelte';
   import Agents from './Agents.svelte';
   import Island from './Island.svelte';
+  import Sky from './Sky.svelte';
+  import Weather, { type WeatherMode } from './Weather.svelte';
   import {
     COLORS,
     TILE_SIZE,
@@ -46,13 +48,117 @@
     // render surfaces observe the same chat log and AI roster. ColonyScene
     // only advances it via useTask (must live inside <Canvas>).
     sim: AgentSim;
+    // Presentation-only. Drives the Weather layer + swaps light presets
+    // below. Defaults to `sun` so existing callers don't need to opt in.
+    weather?: WeatherMode;
     onPick?: (picked: Picked) => void;
     onReady?: (api: CameraApi) => void;
   }
 
-  let { world, sim, onPick, onReady }: Props = $props();
+  let { world, sim, weather = 'sun', onPick, onReady }: Props = $props();
+
+  // Lighting responds to weather. Cloud/rain/storm desaturate the sun and
+  // pull ambient toward cool gray so buildings/agents read as overcast
+  // without touching their materials. Shadows stay on across modes — they
+  // just get softer via the lower directional intensity.
+  const LIGHT_PRESETS: Record<
+    WeatherMode,
+    { amb: number; ambColor: string; dir: number; dirColor: string }
+  > = {
+    // Sun values are tuned against ACES tone mapping + exposure 0.8 so
+    // the Kenney palette reads saturated and the scene feels sunny
+    // rather than dusk-muted. Overcast rigs stay dimmer by design.
+    sun:    { amb: 0.9,  ambColor: '#fff1d8', dir: 2.1,  dirColor: '#fff2cc' },
+    clouds: { amb: 0.55, ambColor: '#d6dde5', dir: 0.7,  dirColor: '#dfe4ea' },
+    rain:   { amb: 0.45, ambColor: '#aab5c2', dir: 0.38, dirColor: '#c5cdd5' },
+    storm:  { amb: 0.3,  ambColor: '#626f7d', dir: 0.2,  dirColor: '#8b95a3' },
+  };
+  const light = $derived(LIGHT_PRESETS[weather]);
+
+  // Tone-mapping exposure per weather. The three.js sky example uses
+  // 0.5 because its scene is a grid — here most of the frame is city /
+  // island, so sun can breathe at 0.8 without blowing out the sky.
+  // Overcast modes stay low so rain/storm keep their muted punch.
+  const EXPOSURE: Record<WeatherMode, number> = {
+    sun: 0.8,
+    clouds: 0.55,
+    rain: 0.45,
+    storm: 0.35,
+  };
+
+  // Sky shader presets. `sun` matches the canonical threejs.org
+  // webgl_shaders_sky example verbatim — turbidity 10 / rayleigh 3 /
+  // elevation 2° / azimuth 180° under ACES tone mapping + exposure 0.5
+  // gives the golden-hour sunset gradient with the sun disc right on
+  // the horizon. Overcast modes damp rayleigh (blue scattering) and
+  // push turbidity so the sky reads as muted haze behind the Weather
+  // cloud field. Storm additionally crushes the sun with high mie.
+  const SKY_PRESETS: Record<
+    WeatherMode,
+    {
+      turbidity: number;
+      rayleigh: number;
+      mieCoefficient: number;
+      mieDirectionalG: number;
+      elevation: number;
+      azimuth: number;
+    }
+  > = {
+    sun:    { turbidity: 10, rayleigh: 3,   mieCoefficient: 0.005, mieDirectionalG: 0.7, elevation: 2,  azimuth: 180 },
+    clouds: { turbidity: 14, rayleigh: 1,   mieCoefficient: 0.02,  mieDirectionalG: 0.7, elevation: 20, azimuth: 180 },
+    rain:   { turbidity: 18, rayleigh: 0.4, mieCoefficient: 0.04,  mieDirectionalG: 0.6, elevation: 15, azimuth: 180 },
+    storm:  { turbidity: 20, rayleigh: 0.2, mieCoefficient: 0.08,  mieDirectionalG: 0.5, elevation: 10, azimuth: 180 },
+  };
+  const sky = $derived(SKY_PRESETS[weather]);
+
+  // Hash world.seed (string) → uint32 for the Weather layer's PRNG.
+  // djb2: cheap, non-crypto, consistent across sessions for the same repo.
+  const weatherSeed = $derived.by(() => {
+    let h = 5381;
+    for (let i = 0; i < world.seed.length; i++) {
+      h = (h * 33) ^ world.seed.charCodeAt(i);
+    }
+    return h >>> 0;
+  });
 
   useTask((delta) => sim.tick(delta));
+
+  // ACES tone mapping + a weather-driven exposure is required for the
+  // Sky shader to read as a proper atmosphere — without ACES the
+  // Preetham output blows out into a flat pale gradient. Exposure
+  // tracks the weather mode so sunny feels sunny (0.8) while rain /
+  // storm stay muted (0.35–0.45). `toneMappingExposure` isn't exposed
+  // as a Canvas prop in Threlte 8, so we reach for the renderer
+  // directly; `toneMapping` goes through the Threlte context so
+  // Threlte's own change tracking picks it up.
+  const ctx = useThrelte();
+  $effect(() => {
+    ctx.toneMapping.set(ACESFilmicToneMapping);
+    ctx.renderer.toneMappingExposure = EXPOSURE[weather];
+  });
+
+  // Per-weather platform tint. The platform renders with an unlit Basic
+  // material (no way around that — it needs to exactly match the Kenney
+  // colormap-sampled green of the hex tiles under sun, and giving it a
+  // GLB material breaks because the hex material is UV-sampled against a
+  // palette atlas). Under non-sun weather the hex tiles (Standard + fog)
+  // darken while an unlit platform would stay bright; we approximate the
+  // same darkening here by multiplying the base color toward the fog
+  // tint per mode. Not physically correct but visually the seam closes.
+  const PLATFORM_TINT: Record<
+    WeatherMode,
+    { mul: number; mix: string; mixAmount: number }
+  > = {
+    sun:    { mul: 1.0,  mix: '#000000', mixAmount: 0 },
+    clouds: { mul: 0.82, mix: '#c8d0da', mixAmount: 0.1 },
+    rain:   { mul: 0.6,  mix: '#7c8795', mixAmount: 0.22 },
+    storm:  { mul: 0.38, mix: '#4a525e', mixAmount: 0.35 },
+  };
+  const platformColor = $derived.by(() => {
+    const t = PLATFORM_TINT[weather];
+    const base = new Color(COLORS.ground).multiplyScalar(t.mul);
+    return base.lerp(new Color(t.mix), t.mixAmount).getStyle();
+  });
 
   // City extent — bounding box of every populated district pad, in world
   // units. Used to size the ground plane and frame the camera so the
@@ -175,6 +281,16 @@
   // districtSize the tile-center is offset half a tile from the bbox center
   // (because `districtBBox` anchors with `floor(W/2)`), so using the tile
   // center here would bleed the pad half a tile onto the adjacent road.
+  // Apply the same weather darkening to arbitrary pad colors so every
+  // "paved" surface (platform + district pads) tints together. Without
+  // this the pads (previously Standard-lit) and the platform (Basic +
+  // manual tint) would drift apart under rain/storm.
+  function tintForWeather(hex: string): string {
+    const t = PLATFORM_TINT[weather];
+    const c = new Color(hex).multiplyScalar(t.mul);
+    return c.lerp(new Color(t.mix), t.mixAmount).getStyle();
+  }
+
   const districtPads = $derived(
     world.districts.map((d) => {
       const hw = Math.floor(d.sizeInTiles.w / 2);
@@ -182,26 +298,31 @@
       const bboxCx = d.center.x - hw + (d.sizeInTiles.w - 1) / 2;
       const bboxCy = d.center.y - hh + (d.sizeInTiles.h - 1) / 2;
       const center = tileToWorld({ x: bboxCx, y: bboxCy }, world.grid, 0.02);
+      const base = d.isGraveyard
+        ? COLORS.graveyardGround
+        : d.isOutskirts
+          ? COLORS.outskirtsGround
+          : COLORS.districtGround;
       return {
         id: d.id,
         center,
         width: d.sizeInTiles.w * TILE_SIZE,
         depth: d.sizeInTiles.h * TILE_SIZE,
-        color: d.isGraveyard
-          ? COLORS.graveyardGround
-          : d.isOutskirts
-            ? COLORS.outskirtsGround
-            : COLORS.districtGround,
+        color: tintForWeather(base),
       };
     }),
   );
 </script>
 
-<!-- Camera + controls -->
+<!-- Camera + controls. `far` is bumped past the Sky box scale (10000)
+     so the atmospheric skybox isn't clipped; near stays small because
+     props like agents can come within arm's reach of the camera. -->
 <T.PerspectiveCamera
   makeDefault
   position={initialCamPos}
   fov={35}
+  near={0.5}
+  far={30000}
 >
   <OrbitControls
     bind:ref={orbitRef}
@@ -213,12 +334,14 @@
   />
 </T.PerspectiveCamera>
 
-<!-- Lights: warm key from above-front, soft ambient fill -->
-<T.AmbientLight intensity={0.55} color="#f4e9d0" />
+<!-- Lights: warm key from above-front, soft ambient fill. Both respond
+     to the weather preset so overcast/rain/storm darken + desaturate
+     the scene without editing per-object materials. -->
+<T.AmbientLight intensity={light.amb} color={light.ambColor} />
 <T.DirectionalLight
   position={[maxDim * 0.6, maxDim * 1.1, maxDim * 0.4]}
-  intensity={1.3}
-  color="#ffe8c2"
+  intensity={light.dir}
+  color={light.dirColor}
   castShadow
 />
 
@@ -255,23 +378,28 @@
        ambient+directional rig darkens it to ~#476544, and the
        renderer's default ACES tone-mapping shifts it further. Basic
        bypasses lighting; `toneMapped=false` bypasses the tone curve.
+       The color is now derived from the weather preset so the platform
+       visually tracks how the hex tiles darken under overcast/storm.
        We lose shadow-reception on the platform, which is fine — it's
        covered by districts/roads/buildings above. -->
-  <T.MeshBasicMaterial color={COLORS.ground} toneMapped={false} />
+  <T.MeshBasicMaterial color={platformColor} toneMapped={false} />
 </T.Mesh>
 
 <!-- Hex-island surround: grass/sand/water rings around the city. -->
 <Island {world} bounds={cityBounds} />
 
-<!-- District pads -->
+<!-- District pads. Basic + toneMapped=false matches the platform's
+     unlit model so platform and pads darken in lockstep under weather.
+     Previously these used MeshStandardMaterial; under non-sun weather
+     the pads would darken via the dimmer light rig while the Basic
+     platform stayed bright, producing a visible step between them. -->
 {#each districtPads as pad (pad.id)}
   <T.Mesh
     position={[pad.center.x, pad.center.y, pad.center.z]}
     rotation={[-Math.PI / 2, 0, 0]}
-    receiveShadow
   >
     <T.PlaneGeometry args={[pad.width, pad.depth]} />
-    <T.MeshStandardMaterial color={pad.color} roughness={1} />
+    <T.MeshBasicMaterial color={pad.color} toneMapped={false} />
   </T.Mesh>
 {/each}
 
@@ -279,3 +407,21 @@
 <Buildings {world} {onPick} />
 <Scenery {world} {onPick} />
 <Agents {world} {sim} {onPick} />
+
+<!-- Procedural sky: Preetham atmospheric-scattering shader, same look as
+     the three.js webgl_shaders_sky example. Mounts behind everything —
+     Sky's BoxGeometry is rendered with depth baked into the shader so
+     other geometry always draws on top. Weather's clouds/fog layer
+     still composites over it for overcast/rain/storm. -->
+<Sky
+  turbidity={sky.turbidity}
+  rayleigh={sky.rayleigh}
+  mieCoefficient={sky.mieCoefficient}
+  mieDirectionalG={sky.mieDirectionalG}
+  elevation={sky.elevation}
+  azimuth={sky.azimuth}
+/>
+
+<!-- Atmospheric layer: clouds, rain, fog, lightning. Sits above the
+     scene graph so fog applies uniformly regardless of mount order. -->
+<Weather mode={weather} bounds={cityBounds} seed={weatherSeed} />

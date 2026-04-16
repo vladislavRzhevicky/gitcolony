@@ -52,13 +52,14 @@ export const COLORS = {
   // `ground` is sampled from the Kenney Hexagon Kit colormap so the city
   // platform plane blends seamlessly with grass hex tiles around it —
   // without this match the platform reads as a raised podium of a
-  // different shade. `districtGround` / `outskirtsGround` are slightly
-  // tinted variants so districts still read as distinct zones on top of
-  // the unified base.
+  // different shade. `districtGround` / `outskirtsGround` are subtly
+  // tinted variants so districts still read as zones but don't punch
+  // out of the unified green base — delta ≈ 3–5 per channel is enough
+  // to catch the eye at road edges without feeling like separate decks.
   ground: '#4f896a',
   groundDark: '#3f5a2c', // retained for legacy; currently unused, safe to remove later.
-  districtGround: '#5c9c79',
-  outskirtsGround: '#45785e',
+  districtGround: '#528d6e',
+  outskirtsGround: '#4b8566',
   // Graveyard district pad — cooler, desaturated so tombstones read
   // against it and the memorial quarter feels distinct from living land.
   graveyardGround: '#4a5560',
