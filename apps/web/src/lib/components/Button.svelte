@@ -10,6 +10,7 @@
     type?: 'button' | 'submit' | 'reset';
     href?: string;
     disabled?: boolean;
+    form?: string;
     onclick?: (e: MouseEvent) => void;
     children: Snippet;
   }
@@ -19,6 +20,7 @@
     type = 'button',
     href,
     disabled = false,
+    form,
     onclick,
     children,
   }: Props = $props();
@@ -29,7 +31,7 @@
     {@render children()}
   </a>
 {:else}
-  <button class="btn btn--{variant}" {type} {disabled} {onclick}>
+  <button class="btn btn--{variant}" {type} {disabled} {form} {onclick}>
     {@render children()}
   </button>
 {/if}

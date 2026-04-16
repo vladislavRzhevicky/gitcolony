@@ -2,7 +2,11 @@ import type { Job } from 'bullmq';
 import { eq } from 'drizzle-orm';
 import { db, schema } from '@gitcolony/db';
 import { decryptSecret } from '@gitcolony/crypto';
-import { fetchCommits } from '@gitcolony/github';
+import {
+  enrichCommitFiles,
+  fetchClosedPullRequests,
+  fetchCommits,
+} from '@gitcolony/github';
 import { extendWorld, generateWorld, rankAll } from '@gitcolony/core';
 import type { LLMConfig } from '@gitcolony/llm';
 import type { JobPhase, JobProgressEvent, World } from '@gitcolony/schema';
@@ -159,14 +163,94 @@ export async function processGeneration(
       },
     });
 
-    if (commits.length === 0) {
+    // Closed-unmerged pull requests become tombstones in the graveyard.
+    // Fetched alongside commits and passed to world-gen. On incremental sync
+    // we pass a timestamp cursor so we only pull the newly-closed ones —
+    // generateWorld's placeGraves is already id-idempotent, but the cursor
+    // keeps the GraphQL bill bounded. Fail-soft: if the PR fetch errors
+    // (rate limit, permissions), we log and continue with an empty list so
+    // the commit pipeline still runs.
+    let closedPrs: Awaited<ReturnType<typeof fetchClosedPullRequests>> = [];
+    try {
+      closedPrs = await fetchClosedPullRequests(token, {
+        owner: ownerPart,
+        name: namePart,
+        untilClosedAt: isIncremental ? city.lastSyncedAt?.toISOString() : undefined,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Fine-grained PATs without `Pull requests: Read` are the common case
+      // here — the repo is readable, PRs aren't. Log at info so we don't
+      // flag an expected scope limitation as a warning on every sync.
+      const isScopeIssue = /Resource not accessible by personal access token/i.test(msg);
+      if (isScopeIssue) {
+        log.info('closed-PR list skipped — token lacks PR scope', { cityId });
+      } else {
+        log.warn('fetchClosedPullRequests failed; continuing without graves', {
+          cityId,
+          error: msg,
+        });
+      }
+    }
+
+    if (commits.length === 0 && closedPrs.length === 0) {
+      // Nothing new upstream — but a sync attempt still completed, so bump
+      // `lastSyncedAt` so the UI's "Synced Nm ago" chip resets. We leave
+      // `lastSyncedSha` alone since no new commits were observed.
+      await db
+        .update(schema.cities)
+        .set({
+          lastSyncedAt: new Date(),
+          ...(repo.totalCommits !== undefined
+            ? { lastTotalCommits: repo.totalCommits }
+            : {}),
+        })
+        .where(eq(schema.cities.id, cityId));
       await report({ phase: 'done', progress: 100, message: 'already up to date' });
       return;
     }
 
+    // --- File enrichment --------------------------------------------------
+    // GraphQL history doesn't return per-commit file paths, so without
+    // REST enrichment the ranker's primaryPath is null for every commit
+    // and district subdivision collapses to the handful of conventional-
+    // commit scopes. We enrich the heaviest commits (by churn) up to a
+    // budget, then fall back for the rest. Budget defaults to 800 REST
+    // calls per sync (~16 % of a 5k-rph PAT quota).
+    const enrichCap = Math.min(
+      commits.length,
+      Number(process.env.ENRICH_FILES_CAP ?? 800),
+    );
+    const enrichTargets = [...commits]
+      .sort((a, b) => b.additions + b.deletions - (a.additions + a.deletions))
+      .slice(0, enrichCap)
+      .map((c) => c.sha);
+
+    const files = await enrichCommitFiles(token, {
+      owner: ownerPart,
+      name: namePart,
+      shas: enrichTargets,
+      onProgress: (done, total) => {
+        // Share the fetching phase progress window: fetch reports 5-50,
+        // enrichment occupies 50-55 visually (brief, usually sub-second
+        // per call but runs in parallel with chunked pagination).
+        const p = 50 + (done / total) * 5;
+        report({
+          phase: 'fetching',
+          progress: p,
+          message: `enriching files ${done}/${total}`,
+        });
+      },
+    });
+
+    const enrichedCommits = commits.map((c) => {
+      const f = files.get(c.sha);
+      return f && f.length > 0 ? { ...c, changedFiles: f } : c;
+    });
+
     // --- Phase: ranking ---------------------------------------------------
     await report({ phase: 'ranking', progress: 55, message: flavor('ranking') });
-    const ranked = rankAll(commits);
+    const ranked = rankAll(enrichedCommits);
 
     // --- Phases: layout → roads → placing ---------------------------------
     // generateWorld runs layout/roads/placing internally in one pass (fast:
@@ -189,20 +273,20 @@ export async function processGeneration(
         await report({ phase: 'layout', progress: 55, message: flavor('layout') });
         await report({ phase: 'roads', progress: 60, message: flavor('roads') });
         await report({ phase: 'placing', progress: 65, message: flavor('placing') });
-        world = generateWorld(repo, ranked);
+        world = generateWorld(repo, ranked, closedPrs);
       } else {
         // Sync: layout + roads are immutable (invariant #2), only placing runs.
         const prev = existing.world as World;
         preExistingObjectIds = new Set(prev.objects.map((o) => o.id));
         preExistingAgentIds = new Set(prev.agents.map((a) => a.id));
         await report({ phase: 'placing', progress: 65, message: flavor('placing') });
-        world = extendWorld(prev, ranked);
+        world = extendWorld(prev, ranked, closedPrs, repo.totalCommits);
       }
     } else {
       await report({ phase: 'layout', progress: 55, message: flavor('layout') });
       await report({ phase: 'roads', progress: 60, message: flavor('roads') });
       await report({ phase: 'placing', progress: 65, message: flavor('placing') });
-      world = generateWorld(repo, ranked);
+      world = generateWorld(repo, ranked, closedPrs);
     }
 
     // --- Phase: naming (LLM, fail-soft) -----------------------------------
@@ -232,6 +316,12 @@ export async function processGeneration(
       .set({
         lastSyncedSha: world.lastCommitSha,
         lastSyncedAt: new Date(),
+        // Record the repo's real commit count so the next re-render can
+        // detect growth and resize the city on a full regenerate. Null-safe:
+        // CLI-sourced worlds won't carry this, and that's fine.
+        ...(repo.totalCommits !== undefined
+          ? { lastTotalCommits: repo.totalCommits }
+          : {}),
       })
       .where(eq(schema.cities.id, cityId));
 

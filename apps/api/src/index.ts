@@ -34,6 +34,15 @@ app.onError((err, c) => {
 });
 
 const port = Number(process.env.PORT ?? 3000);
-export default { port, fetch: app.fetch };
+// Bun's default `idleTimeout` is 10s, which kills our SSE progress streams
+// mid-generation — the naming / ticker phases can each sit quiet for longer
+// than that between state changes. We emit a 15s heartbeat (see
+// routes/cities.ts and routes/jobs.ts) to keep the socket warm, so 30s
+// idleTimeout gives a comfortable margin. Bun caps this at 255s.
+export default {
+  port,
+  fetch: app.fetch,
+  idleTimeout: 30,
+};
 
 log.info('api listening', { port });

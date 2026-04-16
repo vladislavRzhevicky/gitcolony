@@ -66,14 +66,18 @@ function semanticScore(t: SemanticType): number {
       return 25;
     case 'refactor':
       return 20;
+    // Repos without conventional-commit discipline ended up with almost all
+    // commits as tier C/D (unknown + small churn never cleared the tier-B
+    // threshold). Bumped so an average unknown commit can still become a
+    // building when its churn is non-trivial.
+    case 'unknown':
+      return 15;
     case 'test':
       return 12;
     case 'docs':
       return 10;
     case 'chore':
       return 5;
-    case 'unknown':
-      return 8;
   }
 }
 
@@ -139,10 +143,13 @@ export function pickPrimaryPath(c: Commit, depth = 1): string | null {
 // Tier mapping
 // ----------------------------------------------------------------------------
 
+// Thresholds tuned so mid-size commits without conventional discipline can
+// still become buildings. Previous cutoffs (55/35/15) left large repos with
+// <5% tier-B — cities stayed tiny no matter how many commits were ingested.
 function scoreToTier(score: number): Tier {
-  if (score >= 55) return 'A';
-  if (score >= 35) return 'B';
-  if (score >= 15) return 'C';
+  if (score >= 50) return 'A';
+  if (score >= 25) return 'B';
+  if (score >= 10) return 'C';
   return 'D';
 }
 

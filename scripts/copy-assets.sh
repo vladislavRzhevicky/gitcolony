@@ -22,7 +22,7 @@ SRC="$ROOT/textures"
 DST="$ROOT/apps/web/static/models"
 
 rm -rf "$DST"
-mkdir -p "$DST"/{buildings/{suburban,commercial,industrial,low-detail},roads,nature,characters,pets,cars,props/{car,graveyard,fantasy},terrain}
+mkdir -p "$DST"/{buildings/{suburban,commercial,industrial,low-detail},roads,nature,characters,pets,cars,props/{car,graveyard,fantasy,construction},terrain}
 
 copy() {
   local src="$1"
@@ -139,8 +139,38 @@ copy "$CAR_SRC/cone.glb" "$DST/props/car/"
 install_textures "$CAR_SRC/Textures" "$DST/props/car"
 
 GRAVE_SRC="$SRC/Graveyard Kit 5.0/Models/GLB format"
-copy "$GRAVE_SRC/lightpost-single.glb" "$DST/props/graveyard/"
+# Tombstones + funeral props for the Graveyard district (closed-PR memorial).
+for name in \
+  gravestone-bevel gravestone-broken gravestone-cross gravestone-cross-large \
+  gravestone-debris gravestone-decorative gravestone-round gravestone-wide gravestone-roof \
+  grave grave-border \
+  cross cross-wood cross-column \
+  coffin coffin-old \
+  candle candle-multiple \
+  altar-stone altar-wood \
+  bench bench-damaged \
+  fence fence-damaged fence-gate \
+  iron-fence iron-fence-damaged iron-fence-curve iron-fence-bar \
+  iron-fence-border iron-fence-border-column iron-fence-border-curve \
+  iron-fence-border-gate \
+  pillar-small pillar-large pillar-square pillar-obelisk \
+  debris debris-wood \
+  crypt crypt-a crypt-b crypt-small crypt-small-roof \
+  character-ghost \
+  lightpost-single; do
+  copy "$GRAVE_SRC/$name.glb" "$DST/props/graveyard/"
+done
 install_textures "$GRAVE_SRC/Textures" "$DST/props/graveyard"
+
+# ---------------------------------------------------------------------------
+# Construction props — City Kit Roads ships a construction sub-kit (barrier,
+# cone, light). Used to decorate open-PR building sites alongside the WIP
+# structure itself.
+# ---------------------------------------------------------------------------
+for name in construction-barrier construction-cone construction-light; do
+  copy "$ROAD_SRC/$name.glb" "$DST/props/construction/"
+done
+install_textures "$ROAD_SRC/Textures" "$DST/props/construction"
 
 # ---------------------------------------------------------------------------
 # Terrain — Hexagon Kit. Used by Island.svelte to build the island surround

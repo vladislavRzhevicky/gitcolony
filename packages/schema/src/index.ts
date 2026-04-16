@@ -17,6 +17,22 @@ export const CommitSchema = z.object({
 
 export type Commit = z.infer<typeof CommitSchema>;
 
+// Closed-but-not-merged pull requests. Ingested alongside commits and
+// placed as tombstones in `d-graveyard`. Unlike commits these carry no
+// ranker tier (they're always tier D decor) and are addressed by
+// prNumber, not a sha — headSha is kept for display / deep linking only.
+export const ClosedPullRequestSchema = z.object({
+  prNumber: z.number().int().positive(),
+  title: z.string(),
+  authorLogin: z.string().nullable(),
+  closedAt: z.string().datetime(),
+  // Head commit sha at the time the PR was closed. Optional because a
+  // deleted fork leaves GitHub without a dereferenceable oid.
+  headSha: z.string().nullable(),
+});
+
+export type ClosedPullRequest = z.infer<typeof ClosedPullRequestSchema>;
+
 export const RepoDataSchema = z.object({
   source: z.enum(['github', 'cli']),
   owner: z.string(),
@@ -24,6 +40,11 @@ export const RepoDataSchema = z.object({
   fullName: z.string(), // "owner/name"
   defaultBranch: z.string(),
   repoCreatedAt: z.string().datetime().optional(),
+  // Total commit count on the default branch as reported by the source
+  // (GraphQL `history.totalCount`). Independent of how many we actually
+  // ingest — used by world-gen to size the city to the repo's real scale,
+  // not just the ingested window. Optional so older RepoData deserializes.
+  totalCommits: z.number().int().nonnegative().optional(),
   // hard cap: 1000 on initial load, delta on subsequent syncs
   commits: z.array(CommitSchema),
   fetchedAt: z.string().datetime(),
@@ -63,8 +84,11 @@ export type RankedCommit = z.infer<typeof RankedCommitSchema>;
 // ============================================================================
 // World: output of generator, stored as jsonb in city_worlds.world
 //
-// Invariant: seed, archetype, palette, grid, districts are set at first
-// generation and never change on sync. objects/agents grow incrementally.
+// Invariant: seed, archetype, palette stay constant across a city's lifetime.
+// `grid` and `districts` are stable across incremental syncs (extendWorld
+// never resizes them) but ARE recomputed on a full regenerate from the
+// current `totalCommits`, so cities grow with the repo. objects/agents grow
+// incrementally during syncs.
 // ============================================================================
 
 export const TilePosSchema = z.object({
@@ -74,15 +98,20 @@ export const TilePosSchema = z.object({
 export type TilePos = z.infer<typeof TilePosSchema>;
 
 export const DistrictSchema = z.object({
-  id: z.string(), // e.g. "d-frontend", "d-outskirts"
-  name: z.string(), // e.g. "frontend" or "outskirts"
+  id: z.string(), // e.g. "d-frontend", "d-outskirts", "d-graveyard"
+  name: z.string(),
   isOutskirts: z.boolean().default(false),
+  // Graveyard is the memorial district for closed-but-not-merged pull
+  // requests. Only carved out when the repo has at least one such PR to
+  // memorialize; otherwise absent. Assets come exclusively from the Kenney
+  // Graveyard Kit.
+  isGraveyard: z.boolean().default(false),
   center: TilePosSchema,
   sizeInTiles: z.object({
     w: z.number().int().positive(),
     h: z.number().int().positive(),
   }),
-  theme: z.string(), // MVP: always 'generic'
+  theme: z.string(), // MVP: 'generic' for regular, 'graveyard' for graveyard
 });
 
 export type District = z.infer<typeof DistrictSchema>;
@@ -140,7 +169,11 @@ export const WorldStatsSchema = z.object({
   inhabitants: z.number().int().nonnegative(), // tier A count
   buildings: z.number().int().nonnegative(),   // tier B count
   decor: z.number().int().nonnegative(),       // tier C + D count
-  commits: z.number().int().nonnegative(),     // total commits processed
+  commits: z.number().int().nonnegative(),     // total commits ingested into this world
+  // Total commit count on the repo's default branch at generation time.
+  // Usually >> `commits` because we cap ingestion but still want the city
+  // silhouette to reflect the repo's real scale. Optional for back-compat.
+  totalCommits: z.number().int().nonnegative().optional(),
 });
 
 export type WorldStats = z.infer<typeof WorldStatsSchema>;
@@ -168,6 +201,11 @@ export const SceneryPropSchema = z.object({
   id: z.string(), // deterministic: 'tree-x-y'
   variant: z.string(), // asset key, e.g. 'tree-01'
   anchor: TilePosSchema,
+  // Y-axis rotation in radians, applied at render time. Used by directional
+  // props like fences that must align with the grid edge they sit on. 0 for
+  // everything older / isotropic (grass, flowers, trees) — default keeps
+  // pre-rotation worlds deserializable.
+  rotationY: z.number().default(0),
 });
 
 export type SceneryProp = z.infer<typeof SceneryPropSchema>;
@@ -277,7 +315,11 @@ export type OwnedReposResponse = z.infer<typeof OwnedReposResponseSchema>;
 export const CityCreateRequestSchema = z.object({
   // "owner/name" or a github URL; api normalizes.
   repoFullName: z.string().min(3),
-  // Optional PAT for private repos; public flow re-uses the stored OAuth token.
+  // Token source for the ownership check. At most one of these is honored —
+  // `tokenId` resolves to a stored `user_tokens` row (decrypted server-side),
+  // `pat` is an ephemeral inline value not persisted. When neither is set the
+  // stored OAuth session token is used (public flow).
+  tokenId: z.string().uuid().optional(),
   pat: z.string().min(10).optional(),
   visibility: CityVisibilitySchema.default('unlisted'),
 });

@@ -6,10 +6,11 @@ import { customAlphabet } from 'nanoid';
 import { db, schema } from '@gitcolony/db';
 import { requireUser } from '../middleware/auth.js';
 import { enqueueGeneration, jobChannel } from '../queue.js';
-import { checkOwnership } from '@gitcolony/github';
+import { checkOwnership, checkRepoAccess } from '@gitcolony/github';
 import { decryptSecret } from '@gitcolony/crypto';
 import { deriveSeed } from '@gitcolony/core';
 import { CityCreateRequestSchema, type JobProgressEvent } from '@gitcolony/schema';
+import { log } from '@gitcolony/log';
 
 async function resolveOauthToken(userId: string): Promise<string | null> {
   const [row] = await db
@@ -145,32 +146,72 @@ citiesRoute.post('/', async (c) => {
   const repo = normalizeRepo(body.repoFullName);
   if (!repo) return c.json({ error: 'could not parse repo identifier' }, 400);
 
-  // Resolve the token we'll authenticate to GitHub with. For MVP either:
-  //   - inline PAT in the body (not persisted — ephemeral, used only for this
-  //     request's ownership check and then discarded; worker falls back to
-  //     the stored OAuth token for subsequent ingestion)
-  //   - stored OAuth token from login (public-flow)
-  // Persistent PAT tokens (`user_tokens`) remain for the private tab landing later.
-  const oauth = await resolveOauthToken(user.id);
-  const token = body.pat ?? oauth;
+  // Resolve the token we'll authenticate to GitHub with. Priority:
+  //   1. `tokenId` — stored user_tokens row, decrypted here
+  //   2. `pat` — ephemeral inline token (not persisted)
+  //   3. stored OAuth token from login (public flow)
+  let token: string | null = null;
+  let tokenId: string | null = null;
+  if (body.tokenId) {
+    const [row] = await db
+      .select({ encryptedPat: schema.userTokens.encryptedPat })
+      .from(schema.userTokens)
+      .where(
+        and(
+          eq(schema.userTokens.id, body.tokenId),
+          eq(schema.userTokens.userId, user.id),
+        ),
+      )
+      .limit(1);
+    if (!row) return c.json({ error: 'token not found' }, 404);
+    token = decryptSecret(row.encryptedPat);
+    tokenId = body.tokenId;
+  } else if (body.pat) {
+    token = body.pat;
+  } else {
+    token = await resolveOauthToken(user.id);
+  }
   if (!token) {
     return c.json(
       { error: 'no OAuth token on file — please re-login via GitHub' },
       401,
     );
   }
-  const tokenId: string | null = null;
 
-  // Ownership check: repo.owner must match the token-holder's login.
-  const check = await checkOwnership(token, repo.owner, repo.name);
-  if (!check.owned) {
-    const message =
-      check.reason === 'not_found'
-        ? 'repository not found'
-        : check.reason === 'private_inaccessible'
-          ? 'repository is private and not accessible with this token'
-          : `repository is owned by "${check.repoOwner}", not by you (${check.viewerLogin})`;
-    return c.json({ error: message, reason: check.reason }, 403);
+  // Access check. Two branches based on how the caller authenticated:
+  //
+  //   - OAuth session (no tokenId, no pat): strict ownership — the repo
+  //     owner login must equal the viewer login. This keeps the public
+  //     flow from generating colonies for repos the user can see but
+  //     doesn't own (e.g. a public repo of somebody else).
+  //
+  //   - Explicit PAT / saved token: the user has deliberately provided a
+  //     credential scoped to this repo. If the token can read the repo,
+  //     that's authorization enough — covers org repos, outside-
+  //     collaborator repos, repos owned by a different personal account.
+  //
+  // See CLAUDE.md invariant 5 — this branch is the agreed relaxation.
+  const usedExplicitToken = Boolean(body.tokenId) || Boolean(body.pat);
+  if (usedExplicitToken) {
+    const access = await checkRepoAccess(token, repo.owner, repo.name);
+    if (!access.canRead) {
+      const message =
+        access.reason === 'not_found'
+          ? 'repository not found or the token cannot see it'
+          : 'token cannot read this repository';
+      return c.json({ error: message, reason: access.reason }, 403);
+    }
+  } else {
+    const check = await checkOwnership(token, repo.owner, repo.name);
+    if (!check.owned) {
+      const message =
+        check.reason === 'not_found'
+          ? 'repository not found'
+          : check.reason === 'private_inaccessible'
+            ? 'repository is private and not accessible with this token'
+            : `repository is owned by "${check.repoOwner}", not by you (${check.viewerLogin})`;
+      return c.json({ error: message, reason: check.reason }, 403);
+    }
   }
 
   const fullName = `${repo.owner}/${repo.name}`;
@@ -220,11 +261,18 @@ citiesRoute.get('/:slug/events', (c) => {
   const redisUrl = process.env.REDIS_URL!;
 
   return streamSSE(c, async (stream) => {
+    // Long retry tells EventSource NOT to auto-reconnect after we intentionally
+    // close the stream (on done/failed). Otherwise the browser kept spamming
+    // ERR_INCOMPLETE_CHUNKED_ENCODING after long generations because it would
+    // reconnect, get a tiny snapshot, see the stream close again, and loop.
+    const RETRY_MS = 24 * 60 * 60 * 1000;
+
     const city = await findOwnCityBySlug(user.id, slug);
     if (!city) {
       await stream.writeSSE({
         event: 'error',
         data: JSON.stringify({ error: 'not found' }),
+        retry: RETRY_MS,
       });
       await stream.close();
       return;
@@ -246,7 +294,11 @@ citiesRoute.get('/:slug/events', (c) => {
         message: latest.message ?? undefined,
         error: latest.error ?? undefined,
       };
-      await stream.writeSSE({ event: 'progress', data: JSON.stringify(snapshot) });
+      await stream.writeSSE({
+        event: 'progress',
+        data: JSON.stringify(snapshot),
+        retry: RETRY_MS,
+      });
       if (latest.status === 'done' || latest.status === 'failed') {
         await stream.close();
         return;
@@ -260,9 +312,14 @@ citiesRoute.get('/:slug/events', (c) => {
 
     const sub = new IORedis(redisUrl, { maxRetriesPerRequest: null });
     let closed = false;
+    let hb: ReturnType<typeof setInterval> | null = null;
     const cleanup = async () => {
       if (closed) return;
       closed = true;
+      if (hb) {
+        clearInterval(hb);
+        hb = null;
+      }
       try { await sub.unsubscribe(); } catch {}
       sub.disconnect();
     };
@@ -270,6 +327,7 @@ citiesRoute.get('/:slug/events', (c) => {
 
     await sub.subscribe(jobChannel(latest.id));
     sub.on('message', async (_ch, payload) => {
+      if (closed) return;
       await stream.writeSSE({ event: 'progress', data: payload });
       try {
         const evt = JSON.parse(payload) as JobProgressEvent;
@@ -280,10 +338,10 @@ citiesRoute.get('/:slug/events', (c) => {
       } catch {}
     });
 
-    const hb = setInterval(() => {
+    hb = setInterval(() => {
+      if (closed) return;
       stream.writeSSE({ event: 'ping', data: '' }).catch(() => {});
     }, 15_000);
-    stream.onAbort(() => clearInterval(hb));
 
     await new Promise<void>((resolve) => {
       const check = setInterval(() => {
@@ -327,6 +385,7 @@ citiesRoute.post('/:slug/regenerate', async (c) => {
     .where(eq(schema.cities.id, city.id));
 
   const job = await enqueueGeneration(city.id, 'regenerate');
+  log.info('regenerate enqueued', { cityId: city.id, slug, jobId: job.id });
   return c.json({ jobId: job.id });
 });
 

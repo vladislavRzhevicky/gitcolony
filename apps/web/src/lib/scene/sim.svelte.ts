@@ -4,8 +4,10 @@ import type { World } from '@gitcolony/schema';
 // module top. The `./sim` entry exposes only browser-safe code paths.
 import {
   type AgentRuntime,
+  buildGraveyardWalkable,
   buildRoadMask,
   buildSimWalkable,
+  collectGraveyardPOIs,
   collectPOIs,
   flattenPOIs,
   initAgentRuntimes,
@@ -61,6 +63,11 @@ export class AgentSim {
   private walkable;
   private roadMask;
   private pois;
+  // Ghosts stay inside the graveyard; citizens roam the whole colony.
+  private ghostPois;
+  // Clipped walkable mask with everything outside the graveyard bbox
+  // marked blocked, so A* physically cannot route ghosts out of it.
+  private ghostWalkable;
 
   constructor(world: World) {
     this.world = world;
@@ -70,12 +77,21 @@ export class AgentSim {
     // rotation rather than orbiting their home pad. `flattenPOIs` dedupes
     // and sorts deterministically so the rotation is reproducible.
     this.pois = flattenPOIs(collectPOIs(world, this.walkable));
+    this.ghostPois = collectGraveyardPOIs(world, this.walkable);
+    this.ghostWalkable = buildGraveyardWalkable(world, this.walkable);
     const runtimes = initAgentRuntimes(
       world,
       this.walkable,
       collectPOIs(world, this.walkable),
       this.roadMask,
     );
+    // initAgentRuntimes uses the global walkable+POIs to plan the first
+    // path. For ghosts that can route them outside the graveyard before
+    // the tick loop takes over with the clipped masks. Drop those paths so
+    // the first tick replans against ghostWalkable / ghostPois.
+    for (const rt of runtimes) {
+      if (rt.role === 'ghost') rt.path = [];
+    }
     this.slots = runtimes.map((rt: AgentRuntime) => this.slotFromRuntime(rt));
     this.poses = this.slots.map((s) => ({
       id: s.rt.id,
@@ -99,7 +115,13 @@ export class AgentSim {
     if (this.elapsed >= TICK_SECONDS) {
       this.elapsed = Math.min(this.elapsed - TICK_SECONDS, TICK_SECONDS);
       for (const s of this.slots) {
-        stepAgent(s.rt, this.walkable, this.pois, this.roadMask);
+        const isGhost = s.rt.role === 'ghost';
+        const walkable = isGhost ? this.ghostWalkable : this.walkable;
+        const pois = isGhost ? this.ghostPois : this.pois;
+        // Ghosts don't care about roads — they drift across the graveyard
+        // pad, so skip the road-preferring heuristic for them.
+        const road = isGhost ? undefined : this.roadMask;
+        stepAgent(s.rt, walkable, pois, road);
         this.rearmSlot(s);
       }
     }

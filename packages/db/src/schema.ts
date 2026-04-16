@@ -86,6 +86,11 @@ export const cities = pgTable(
     syncMode: syncModeEnum('sync_mode').default('manual').notNull(),
     lastSyncedSha: text('last_synced_sha'),
     lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }),
+    // Repo's total commit count on its default branch at last observation.
+    // Updated on every generation/sync; drives the building/resident budget
+    // curves so a city's silhouette scales with the real repo size, not
+    // with the ingested window. Nullable for rows predating this column.
+    lastTotalCommits: integer('last_total_commits'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({

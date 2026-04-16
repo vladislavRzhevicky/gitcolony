@@ -28,6 +28,7 @@
     y: number;
     z: number;
     scale: number;
+    rotationY: number;
     obj: WorldObject | null; // null for scenery props (non-pickable)
   }
 
@@ -37,7 +38,7 @@
     let cancelled = false;
     instances = [];
 
-    type Job = { id: string; url: string; x: number; z: number; y: number; scale: number; obj: WorldObject | null };
+    type Job = { id: string; url: string; x: number; z: number; y: number; scale: number; rotationY: number; obj: WorldObject | null };
     const jobs: Job[] = [];
 
     for (const obj of world.objects) {
@@ -52,6 +53,7 @@
         z: p.z,
         y: model.yOffset,
         scale: model.scale,
+        rotationY: 0,
         obj,
       });
     }
@@ -66,6 +68,7 @@
         z: p.z,
         y: model.yOffset,
         scale: model.scale,
+        rotationY: prop.rotationY ?? 0,
         obj: null,
       });
     }
@@ -73,7 +76,7 @@
     Promise.all(
       jobs.map(async (j): Promise<DecorInstance> => {
         const scene = await cloneTemplate(j.url);
-        return { id: j.id, scene, x: j.x, y: j.y, z: j.z, scale: j.scale, obj: j.obj };
+        return { id: j.id, scene, x: j.x, y: j.y, z: j.z, scale: j.scale, rotationY: j.rotationY, obj: j.obj };
       }),
     ).then((resolved) => {
       if (!cancelled) instances = resolved;
@@ -94,6 +97,7 @@
 {#each instances as inst (inst.id)}
   <T.Group
     position={[inst.x, inst.y, inst.z]}
+    rotation={[0, inst.rotationY, 0]}
     scale={[inst.scale, inst.scale, inst.scale]}
     onclick={inst.obj ? (e: unknown) => handleClick(e, inst.obj) : undefined}
   >

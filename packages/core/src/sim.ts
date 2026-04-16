@@ -3,6 +3,7 @@ import {
   type GridMask,
   buildOccupiedMask,
   createMask,
+  districtBBox,
   getBit,
   inBounds,
   setBit,
@@ -99,6 +100,55 @@ export function collectPOIs(
   return byDistrict;
 }
 
+/**
+ * Walkable tiles inside the graveyard district's bbox — the POI pool for
+ * ghost agents, who wander only within the memorial pad. Empty when there
+ * is no graveyard district (or the whole pad filled up with graves).
+ */
+export function collectGraveyardPOIs(
+  world: Pick<World, 'districts' | 'grid'>,
+  walkable: GridMask,
+): TilePos[] {
+  const graveyard = world.districts.find((d) => d.isGraveyard);
+  if (!graveyard) return [];
+  const bbox = districtBBox(graveyard, world.grid);
+  const out: TilePos[] = [];
+  for (let y = bbox.y0; y <= bbox.y1; y++) {
+    for (let x = bbox.x0; x <= bbox.x1; x++) {
+      if (!inBounds(walkable, x, y)) continue;
+      if (getBit(walkable, x, y) === 1) continue;
+      out.push({ x, y });
+    }
+  }
+  return out;
+}
+
+/**
+ * Walkable mask clipped to the graveyard bbox — everything outside the
+ * memorial pad is marked blocked, so A* cannot route ghosts through
+ * neighboring districts even when the shortcut would be shorter.
+ */
+export function buildGraveyardWalkable(
+  world: Pick<World, 'districts' | 'grid'>,
+  walkable: GridMask,
+): GridMask {
+  const clipped = createMask(world.grid);
+  // Start fully blocked, then punch holes inside the graveyard bbox where
+  // the base walkable is also free.
+  for (let i = 0; i < clipped.bits.length; i++) clipped.bits[i] = 1;
+  const graveyard = world.districts.find((d) => d.isGraveyard);
+  if (!graveyard) return clipped;
+  const bbox = districtBBox(graveyard, world.grid);
+  for (let y = bbox.y0; y <= bbox.y1; y++) {
+    for (let x = bbox.x0; x <= bbox.x1; x++) {
+      if (!inBounds(walkable, x, y)) continue;
+      if (getBit(walkable, x, y) === 1) continue;
+      setBit(clipped, x, y, 0);
+    }
+  }
+  return clipped;
+}
+
 function findEntrance(obj: WorldObject, walkable: GridMask): TilePos | null {
   // Gather all 4-neighbors of the footprint that are not themselves part of
   // the footprint. Scan in (y, x) order for determinism.
@@ -139,6 +189,7 @@ export interface AgentRuntime {
   id: string;
   commitSha: string;
   districtId: string;
+  role: string;
   pos: TilePos;
   path: TilePos[];
   poiIndex: number;
@@ -187,6 +238,7 @@ export function initAgentRuntimes(
       id: a.id,
       commitSha: a.commitSha,
       districtId: a.districtId,
+      role: a.role,
       pos: { x: a.spawn.x, y: a.spawn.y },
       path: [],
       poiIndex: startIdx,

@@ -7,7 +7,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { invalidateAll, goto } from '$app/navigation';
   import { Canvas } from '@threlte/core';
-  import { Chip } from '$lib/components';
+  import { Chip, ConfirmDialog } from '$lib/components';
   import ColonyScene from '$lib/scene/ColonyScene.svelte';
   import CommitPanel from '$lib/scene/CommitPanel.svelte';
   import Ticker from '$lib/scene/Ticker.svelte';
@@ -61,23 +61,31 @@
         progress = evt.progress;
         message = evt.message ?? null;
         errorMsg = evt.error ?? null;
-        if (evt.phase === 'done') {
-          await invalidateAll();
+        if (evt.phase === 'done' || evt.phase === 'failed') {
+          // Close BEFORE awaiting anything so the browser doesn't auto-
+          // reconnect the tiny window between server close and our handler.
           es?.close();
-        } else if (evt.phase === 'failed') {
-          es?.close();
+          es = null;
+          if (evt.phase === 'done') await invalidateAll();
         }
       } catch {
         // malformed payload — ignore frame
       }
     });
-    es.onerror = () => {};
+    es.onerror = () => {
+      // If the stream is terminal there's no reason to let the browser retry.
+      if (isTerminal) {
+        es?.close();
+        es = null;
+      }
+    };
   });
 
   onDestroy(() => es?.close());
 
   let busy = $state(false);
   let actionError = $state<string | null>(null);
+  let confirming = $state<'regenerate' | 'delete' | null>(null);
 
   async function resubscribe() {
     es?.close();
@@ -89,11 +97,10 @@
         progress = evt.progress;
         message = evt.message ?? null;
         errorMsg = evt.error ?? null;
-        if (evt.phase === 'done') {
-          await invalidateAll();
+        if (evt.phase === 'done' || evt.phase === 'failed') {
           es?.close();
-        } else if (evt.phase === 'failed') {
-          es?.close();
+          es = null;
+          if (evt.phase === 'done') await invalidateAll();
         }
       } catch {}
     });
@@ -101,7 +108,6 @@
 
   async function onRegenerate() {
     if (busy) return;
-    if (!confirm('Regenerate from scratch? The current world will be discarded.')) return;
     busy = true;
     actionError = null;
     try {
@@ -113,8 +119,10 @@
       message = null;
       errorMsg = null;
       await resubscribe();
+      confirming = null;
     } catch (e) {
       actionError = e instanceof Error ? e.message : 'failed to regenerate';
+      confirming = null;
     } finally {
       busy = false;
     }
@@ -142,7 +150,6 @@
 
   async function onDelete() {
     if (busy) return;
-    if (!confirm(`Delete colony for ${data.city?.repoFullName}? This cannot be undone.`)) return;
     busy = true;
     actionError = null;
     try {
@@ -151,9 +158,37 @@
       await goto('/');
     } catch (e) {
       actionError = e instanceof Error ? e.message : 'failed to delete';
+      confirming = null;
       busy = false;
     }
   }
+
+  // Building breakdown by Kenney kit prefix — `suburban-*`, `commercial-*`
+  // (including `commercial-skyscraper-*`), `industrial-*`. Only tier-B
+  // objects carry kit variants; decor lives in its own tables. We surface
+  // just the kits actually present so small repos (suburban-only) don't
+  // stare at two empty zero-chips.
+  const buildingCounts = $derived.by(() => {
+    let suburban = 0;
+    let commercial = 0;
+    let industrial = 0;
+    if (!world) return { suburban, commercial, industrial };
+    for (const o of world.objects) {
+      if (o.kind !== 'building') continue;
+      if (o.variant.startsWith('suburban-')) suburban++;
+      else if (o.variant.startsWith('commercial-')) commercial++;
+      else if (o.variant.startsWith('industrial-')) industrial++;
+    }
+    return { suburban, commercial, industrial };
+  });
+
+  // Quarter count excludes outskirts — it's the invariant-#3 fallback and
+  // always exists, so counting it inflates the figure by 1 even for empty
+  // repos. Graveyard is included when present since it's a real named
+  // quarter with its own pad and theme.
+  const districtCount = $derived(
+    world ? world.districts.filter((d) => !d.isOutskirts).length : 0,
+  );
 
   // Friendly "synced Nm ago" line for the bottom-left status chip.
   // We use lastSyncedAt from the city row if present, else show phase while
@@ -196,17 +231,35 @@
     <span class="bar__repo mono">{data.city?.repoFullName}</span>
     {#if world}
       <span class="bar__sep" aria-hidden="true"></span>
-      <Chip>
+      <Chip tip="Inhabitants (agents)">
         <svg class="chip-ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z"/></svg>
         {world.stats.inhabitants}
       </Chip>
-      <Chip>
-        <svg class="chip-ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18M4 22h16M10 6h4M10 10h4M10 14h4M10 18h4"/></svg>
-        {world.stats.buildings}
+      <Chip tip="Districts">
+        <svg class="chip-ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></svg>
+        {districtCount}
       </Chip>
-      <Chip>
+      {#if buildingCounts.suburban > 0}
+        <Chip tip="Suburban buildings">
+          <svg class="chip-ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 10l9-7 9 7v11a1 1 0 0 1-1 1h-5v-7h-6v7H4a1 1 0 0 1-1-1z"/></svg>
+          {buildingCounts.suburban}
+        </Chip>
+      {/if}
+      {#if buildingCounts.commercial > 0}
+        <Chip tip="Commercial buildings">
+          <svg class="chip-ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 22V6a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16M14 10h4a2 2 0 0 1 2 2v10M8 8h2M8 12h2M8 16h2M16 14h0M16 18h0"/></svg>
+          {buildingCounts.commercial}
+        </Chip>
+      {/if}
+      {#if buildingCounts.industrial > 0}
+        <Chip tip="Industrial buildings">
+          <svg class="chip-ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M2 22V12l6 4v-4l6 4V8l8-4v18zM6 18h0M12 18h0M18 18h0"/></svg>
+          {buildingCounts.industrial}
+        </Chip>
+      {/if}
+      <Chip tip={world.stats.totalCommits !== undefined && world.stats.totalCommits !== world.stats.commits ? `Commits on default branch (${world.stats.commits} ingested)` : 'Commits'}>
         <svg class="chip-ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 2a6 6 0 0 0-4 10.5A6 6 0 0 0 12 22a6 6 0 0 0 4-9.5A6 6 0 0 0 12 2ZM12 22v-9"/></svg>
-        {world.stats.commits}
+        {world.stats.totalCommits ?? world.stats.commits}
       </Chip>
     {/if}
     <span class="bar__sep" aria-hidden="true"></span>
@@ -216,17 +269,17 @@
       disabled={busy || !isTerminal}
       onclick={onSync}
       aria-label="Sync"
-      title="Sync"
+      data-tip="Sync"
     >
       <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 0 1-15 6.7L3 16M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M3 21v-5h5"/></svg>
     </button>
     <button
       type="button"
       class="bar__icon"
-      disabled={busy || !isTerminal}
-      onclick={onRegenerate}
+      disabled={busy}
+      onclick={() => (confirming = 'regenerate')}
       aria-label="Regenerate"
-      title="Regenerate"
+      data-tip="Regenerate"
     >
       <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/></svg>
     </button>
@@ -234,9 +287,9 @@
       type="button"
       class="bar__icon bar__icon--danger"
       disabled={busy}
-      onclick={onDelete}
+      onclick={() => (confirming = 'delete')}
       aria-label="Delete"
-      title="Delete colony"
+      data-tip="Delete colony"
     >
       <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14M10 11v6M14 11v6"/></svg>
     </button>
@@ -311,6 +364,28 @@
     <CommitPanel {picked} onClose={() => (picked = null)} />
     <Ticker events={world.ticker ?? []} />
   {/if}
+
+  <ConfirmDialog
+    open={confirming === 'regenerate'}
+    title="Regenerate colony?"
+    message="This rebuilds the world from scratch using the latest commits. The existing layout will be replaced."
+    confirmLabel="Regenerate"
+    variant="primary"
+    busy={busy && confirming === 'regenerate'}
+    onConfirm={onRegenerate}
+    onCancel={() => (confirming = null)}
+  />
+
+  <ConfirmDialog
+    open={confirming === 'delete'}
+    title="Delete colony?"
+    message="The world, agents, and ingested commit history for this repo will be permanently removed. This cannot be undone."
+    confirmLabel="Delete"
+    variant="danger"
+    busy={busy && confirming === 'delete'}
+    onConfirm={onDelete}
+    onCancel={() => (confirming = null)}
+  />
 </div>
 
 <style>
@@ -350,7 +425,7 @@
     border: var(--stroke-w) solid var(--stroke);
     border-radius: 6px;
     backdrop-filter: blur(8px);
-    z-index: 3;
+    z-index: 10;
   }
   .bar__brand {
     font-family: var(--font-head);
@@ -369,6 +444,7 @@
     background: var(--stroke);
   }
   .bar__icon {
+    position: relative;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -376,6 +452,31 @@
     height: 24px;
     color: var(--fg-1);
     transition: color var(--dur-fast) var(--ease-out);
+  }
+  /* Instant CSS tooltip — native [title] has a ~1s browser delay. Renders
+     below the icon so it doesn't cover the top-bar controls to either side. */
+  .bar__icon[data-tip]::after {
+    content: attr(data-tip);
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 4px 8px;
+    background: var(--bg-2);
+    border: var(--stroke-w) solid var(--stroke);
+    border-radius: var(--radius-sm, 4px);
+    font-family: var(--font-ui);
+    font-size: var(--fs-xs, 12px);
+    color: var(--fg-0);
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--dur-fast) var(--ease-out);
+    z-index: 20;
+  }
+  .bar__icon[data-tip]:hover::after,
+  .bar__icon[data-tip]:focus-visible::after {
+    opacity: 1;
   }
   .bar__icon:hover:not(:disabled) {
     color: var(--fg-0);
