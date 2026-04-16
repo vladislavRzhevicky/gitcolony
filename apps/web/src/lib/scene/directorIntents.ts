@@ -22,12 +22,12 @@ import type {
 } from './directorLlm';
 import { DirectorLlmBridge } from './directorLlm';
 
-// Rough cadence: each agent asks for a fresh intent every 40-90s on top of
+// Rough cadence: each agent asks for a fresh intent every 135-270s on top of
 // a first-ask stagger so they don't synchronise. Matches the chat throttle
 // feel — the colony should look deliberate, not twitchy.
 const TICK_SECONDS = 0.9;
-const BASE_REQUERY_TICKS = Math.round(45 / TICK_SECONDS); // ~45s
-const REQUERY_JITTER_TICKS = Math.round(45 / TICK_SECONDS);
+const BASE_REQUERY_TICKS = Math.round(135 / TICK_SECONDS); // ~135s
+const REQUERY_JITTER_TICKS = Math.round(135 / TICK_SECONDS);
 const INITIAL_STAGGER_TICKS = Math.round(20 / TICK_SECONDS);
 // Hard upper bound on a follow_agent intent — keeps an agent from locking
 // onto a moving target forever if the peer never settles.

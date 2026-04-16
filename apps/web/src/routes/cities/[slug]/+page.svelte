@@ -9,6 +9,7 @@
   import { Canvas } from '@threlte/core';
   import { Chip, ConfirmDialog } from '$lib/components';
   import ColonyScene, { type CameraApi, type CameraMode } from '$lib/scene/ColonyScene.svelte';
+  import type { WeatherMode } from '$lib/scene/Weather.svelte';
   import CommitPanel from '$lib/scene/CommitPanel.svelte';
   import ChatPanel from '$lib/scene/ChatPanel.svelte';
   import Ticker from '$lib/scene/Ticker.svelte';
@@ -143,6 +144,11 @@
   // OrbitControls mounts; until then the rail buttons no-op safely.
   let cameraApi = $state<CameraApi | null>(null);
   let cameraMode = $state<CameraMode>('orbit');
+
+  // Weather toggle — presentation-only, never persisted. Starts on `sun`
+  // so a fresh colony reads as the same warm scene it always did.
+  let weather = $state<WeatherMode>('sun');
+  const WEATHERS: WeatherMode[] = ['sun', 'clouds', 'rain', 'storm'];
 
   function setCameraMode(mode: CameraMode) {
     cameraMode = mode;
@@ -282,6 +288,7 @@
         <ColonyScene
           {world}
           {sim}
+          {weather}
           onPick={(p) => (picked = p)}
           onReady={(api) => {
             cameraApi = api;
@@ -415,6 +422,49 @@
       onclick={() => cameraApi?.reset()}
     >
       <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/></svg>
+    </button>
+
+    <span class="rail__sep" aria-hidden="true"></span>
+
+    <button
+      type="button"
+      class="rail__btn"
+      class:rail__btn--active={weather === 'sun'}
+      aria-label="Sunny"
+      aria-pressed={weather === 'sun'}
+      onclick={() => (weather = 'sun')}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+    </button>
+    <button
+      type="button"
+      class="rail__btn"
+      class:rail__btn--active={weather === 'clouds'}
+      aria-label="Cloudy"
+      aria-pressed={weather === 'clouds'}
+      onclick={() => (weather = 'clouds')}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M17.5 19a4.5 4.5 0 0 0 1-8.9A7 7 0 0 0 4 12.5 4.5 4.5 0 0 0 6 19Z"/></svg>
+    </button>
+    <button
+      type="button"
+      class="rail__btn"
+      class:rail__btn--active={weather === 'rain'}
+      aria-label="Rain"
+      aria-pressed={weather === 'rain'}
+      onclick={() => (weather = 'rain')}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M17.5 13a4.5 4.5 0 0 0 1-8.9A7 7 0 0 0 4 6.5 4.5 4.5 0 0 0 6 13M8 16l-1 4M12 16l-1 4M16 16l-1 4"/></svg>
+    </button>
+    <button
+      type="button"
+      class="rail__btn"
+      class:rail__btn--active={weather === 'storm'}
+      aria-label="Storm"
+      aria-pressed={weather === 'storm'}
+      onclick={() => (weather = 'storm')}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M17.5 13a4.5 4.5 0 0 0 1-8.9A7 7 0 0 0 4 6.5 4.5 4.5 0 0 0 6 13M13 13l-3 5h3l-2 4 5-6h-3z"/></svg>
     </button>
   </nav>
 
@@ -649,6 +699,12 @@
   .rail__btn svg {
     width: 16px;
     height: 16px;
+  }
+  .rail__sep {
+    display: block;
+    height: 1px;
+    margin: var(--space-1, 4px) 4px;
+    background: var(--stroke);
   }
 
   /* Status chip ------------------------------------------------------- */
