@@ -15,6 +15,7 @@ import { generateObject } from 'ai';
 import { z } from 'zod';
 import { log } from '@gitcolony/log';
 import { getModel, type LLMConfig } from './gemini.js';
+import { buildDirectorPrompt } from './prompts.js';
 
 export interface DirectorAgent {
   id: string;
@@ -49,34 +50,27 @@ export interface DirectorInput {
   timeOfDay?: 'morning' | 'afternoon' | 'evening' | 'night';
 }
 
-// Discriminated union over the four actions the sim knows how to execute.
-// Keep the set small — every new case is renderer + sim work.
-export const AgentIntentSchema = z.discriminatedUnion('kind', [
-  z.object({
-    kind: z.literal('goto_poi'),
-    districtId: z.string().min(1).max(80),
-    reason: z.string().max(80).optional(),
-  }),
-  z.object({
-    kind: z.literal('follow_agent'),
-    agentId: z.string().min(1).max(80),
-    reason: z.string().max(80).optional(),
-  }),
-  z.object({
-    kind: z.literal('idle'),
-    // How many sim ticks to loiter. 1 tick ≈ 0.9s in the web client; the
-    // server clamps to a reasonable range so a stuck LLM can't freeze an
-    // agent for minutes.
-    ticks: z.number().int().min(1).max(40),
-    reason: z.string().max(80).optional(),
-  }),
-  z.object({
-    kind: z.literal('wander'),
-    reason: z.string().max(80).optional(),
-  }),
-]);
+// External contract — discriminated union over the four actions the sim
+// knows how to execute. Keep the set small; every new case is renderer +
+// sim work.
+export type AgentIntent =
+  | { kind: 'goto_poi'; districtId: string; reason?: string }
+  | { kind: 'follow_agent'; agentId: string; reason?: string }
+  | { kind: 'idle'; ticks: number; reason?: string }
+  | { kind: 'wander'; reason?: string };
 
-export type AgentIntent = z.infer<typeof AgentIntentSchema>;
+// Flat schema actually handed to Gemini. Gemini 2.5 Flash-Lite is flaky
+// with `anyOf` (what `z.discriminatedUnion` compiles to) and routinely
+// generates objects that fail validation. Flat-plus-optionals is robust,
+// and we coerce back to the union in `coerceIntent`.
+const FlatIntentSchema = z.object({
+  kind: z.enum(['goto_poi', 'follow_agent', 'idle', 'wander']),
+  districtId: z.string().max(80).optional(),
+  agentId: z.string().max(80).optional(),
+  // Gemini sometimes returns floats; round + clamp in coerceIntent.
+  ticks: z.number().optional(),
+  reason: z.string().max(80).optional(),
+});
 
 /**
  * Asks the LLM to pick one next action for the subject agent. Returns null
@@ -90,17 +84,47 @@ export async function pickAgentIntent(
   try {
     const { object } = await generateObject({
       model: getModel(config),
-      schema: AgentIntentSchema,
-      maxRetries: 1,
-      prompt: buildPrompt(input),
+      schema: FlatIntentSchema,
+      maxRetries: 2,
+      prompt: buildDirectorPrompt(input),
     });
-    return validateReferences(object, input);
+    const intent = coerceIntent(object);
+    if (!intent) return null;
+    return validateReferences(intent, input);
   } catch (err) {
     log.warn('llm director failed', {
       agent: input.subject.label,
       err: err instanceof Error ? err.message : String(err),
     });
     return null;
+  }
+}
+
+/**
+ * Collapse Gemini's flat output onto the discriminated union. Missing or
+ * out-of-range fields for the declared `kind` degrade to `wander` rather
+ * than dropping the response — the LLM picked a direction, we honour the
+ * spirit of it.
+ */
+function coerceIntent(o: z.infer<typeof FlatIntentSchema>): AgentIntent | null {
+  const reason = o.reason;
+  switch (o.kind) {
+    case 'goto_poi':
+      if (o.districtId && o.districtId.length > 0) {
+        return { kind: 'goto_poi', districtId: o.districtId, reason };
+      }
+      return { kind: 'wander', reason };
+    case 'follow_agent':
+      if (o.agentId && o.agentId.length > 0) {
+        return { kind: 'follow_agent', agentId: o.agentId, reason };
+      }
+      return { kind: 'wander', reason };
+    case 'idle': {
+      const ticks = Math.max(1, Math.min(40, Math.round(o.ticks ?? 6)));
+      return { kind: 'idle', ticks, reason };
+    }
+    case 'wander':
+      return { kind: 'wander', reason };
   }
 }
 
@@ -124,53 +148,3 @@ function validateReferences(
   return intent;
 }
 
-function buildPrompt(input: DirectorInput): string {
-  const { subject, districts, peers, timeOfDay } = input;
-  const districtLines = districts
-    .map((d) => {
-      const tags = [
-        d.isHome ? 'home' : '',
-        d.isCurrent ? 'here' : '',
-      ]
-        .filter(Boolean)
-        .join(',');
-      const suffix = tags ? ` [${tags}]` : '';
-      return `  - id=${d.id} | name=${d.name} | pop=${d.population}${suffix}`;
-    })
-    .join('\n');
-  const peerLines = peers.length
-    ? peers
-        .map((p) => `  - id=${p.id} | label=${p.label} | in=${p.districtName ?? 'unknown'}`)
-        .join('\n')
-    : '  (no peers nearby)';
-
-  return [
-    'You direct one inhabitant of a small stylized city built from a code repository.',
-    'Pick exactly one next action from the available tools. Stay in character.',
-    '',
-    'Subject:',
-    `  label=${subject.label} | home=${subject.homeDistrictName ?? 'unknown'} | current=${subject.currentDistrictName ?? 'unknown'}`,
-    `  vibe=${subject.personality ?? 'steady citizen'}`,
-    `  from commit="${truncate(subject.commitSubject ?? '', 80)}"`,
-    '',
-    'Districts (id, name, population):',
-    districtLines || '  (none)',
-    '',
-    'AI peers in the colony:',
-    peerLines,
-    timeOfDay ? `\nTime of day: ${timeOfDay}` : '',
-    '',
-    'Rules:',
-    '- Prefer variety over repetition. Do not always `goto_poi`.',
-    '- `goto_poi.districtId` MUST be one of the district ids listed above.',
-    '- `follow_agent.agentId` MUST be one of the AI peer ids listed above.',
-    '- `idle.ticks` is 1..40. Reasonable loiter is 4..12.',
-    '- `reason` is optional, under 80 chars, in-character third-person.',
-  ]
-    .filter(Boolean)
-    .join('\n');
-}
-
-function truncate(s: string, n: number): string {
-  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
-}

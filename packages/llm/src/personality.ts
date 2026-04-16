@@ -9,6 +9,7 @@ import { generateObject } from 'ai';
 import { z } from 'zod';
 import { log } from '@gitcolony/log';
 import { getModel, type LLMConfig } from './gemini.js';
+import { buildPersonalityPrompt } from './prompts.js';
 
 export interface AgentProfileInput {
   id: string;
@@ -67,27 +68,4 @@ export async function generateAgentProfiles(
     }
   }
   return out;
-}
-
-function buildPersonalityPrompt(items: readonly AgentProfileInput[]): string {
-  const lines = items.map(
-    (it) =>
-      `- id=${it.id} | author=${it.authorLogin ?? 'anon'} | district=${it.districtName} | type=${it.semanticType} | commit="${truncate(it.commitMessage, 140)}"`,
-  );
-  return [
-    'You write character profiles for inhabitants of a stylized city built from a software repository.',
-    'Each inhabitant was spawned by one git commit and lives in a district named after a top-level project folder.',
-    '',
-    'Rules:',
-    '- displayName: a short in-world name (1-2 words, max 24 chars). May playfully riff on the author handle but is not the handle itself.',
-    '- personality: one sentence, English, max 100 chars, no trailing period. Voice the trade or temperament implied by the commit type and district. No emoji, no mention of git/code/commits.',
-    '- Each input has a stable id; respond with the same id verbatim.',
-    '',
-    'Inhabitants:',
-    ...lines,
-  ].join('\n');
-}
-
-function truncate(s: string, n: number): string {
-  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }

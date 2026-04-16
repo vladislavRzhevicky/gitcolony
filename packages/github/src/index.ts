@@ -518,6 +518,62 @@ export async function enrichCommitFiles(
 }
 
 // ============================================================================
+// Commit patches (per-commit unified diffs for the code-review phase)
+//
+// The LLM review feature needs real source snippets keyed by commit sha. REST
+// `/repos/:o/:n/commits/:sha` already returns each file's unified-diff patch
+// inline, so one request gives us everything we need for a single commit.
+// Commits are immutable, so the caller caches the result by `owner/name@sha`.
+// ============================================================================
+
+export interface CommitFilePatch {
+  filename: string;
+  status: string;            // added|modified|removed|renamed|copied
+  additions: number;
+  deletions: number;
+  patch: string | null;      // null for binaries / too-large files
+}
+
+export async function fetchCommitPatches(
+  token: string,
+  owner: string,
+  name: string,
+  sha: string,
+): Promise<CommitFilePatch[] | null> {
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${name}/commits/${sha}`,
+      {
+        headers: {
+          authorization: `bearer ${token}`,
+          accept: 'application/vnd.github+json',
+          'x-github-api-version': '2022-11-28',
+        },
+      },
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      files?: Array<{
+        filename: string;
+        status?: string;
+        additions?: number;
+        deletions?: number;
+        patch?: string;
+      }>;
+    };
+    return (data.files ?? []).map((f) => ({
+      filename: f.filename,
+      status: f.status ?? 'modified',
+      additions: f.additions ?? 0,
+      deletions: f.deletions ?? 0,
+      patch: f.patch ?? null,
+    }));
+  } catch {
+    return null;
+  }
+}
+
+// ============================================================================
 // Closed pull requests
 //
 // We fetch PRs that were closed WITHOUT being merged — merged ones are

@@ -20,6 +20,8 @@
     type MeetingFetchResult,
     type AgentIntentFetcher,
     type AgentIntentFetchResult,
+    type ReviewFetcher,
+    type ReviewFetchResult,
   } from '$lib/scene/sim.svelte';
   import type { JobPhase, JobProgressEvent, World } from '@gitcolony/schema';
   import type { PageData } from './$types';
@@ -101,7 +103,31 @@
           }
         }
       : undefined;
-    return new AgentSim(world, { fetchMeetingLines, fetchAgentIntent });
+    // Review endpoint is LLM-gated and cheaper to keep dark when there is
+    // no key on file. 204 is the "no reviewable snippet in this commit"
+    // signal — surface as null so the sim falls back to a regular greeting.
+    const fetchReviewLines: ReviewFetcher | undefined = data.aiEnabled
+      ? async (input) => {
+          const res = await fetch('/api/ai/review', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(input),
+          });
+          if (!res.ok) return null;
+          if (res.status === 204) return null;
+          try {
+            return (await res.json()) as ReviewFetchResult;
+          } catch {
+            return null;
+          }
+        }
+      : undefined;
+    return new AgentSim(world, {
+      fetchMeetingLines,
+      fetchAgentIntent,
+      fetchReviewLines,
+      citySlug: data.slug,
+    });
   });
 
   onMount(() => {

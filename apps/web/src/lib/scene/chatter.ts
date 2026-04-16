@@ -116,6 +116,18 @@ export function mockLines(
  */
 export type ChatMessageSource = 'mock' | 'llm' | 'llm-fallback';
 
+/**
+ * Source snippet the two speakers are reacting to in a code-review exchange.
+ * Attached only to the opener (first message of the pair); the reply
+ * piggybacks on it via meetingId so the UI can dedupe.
+ */
+export interface ReviewQuote {
+  filename: string;
+  language: string | null;
+  lines: string[];
+  startLine: number;
+}
+
 export interface BuiltChatMessage {
   id: string;
   meetingId: string;
@@ -129,6 +141,8 @@ export interface BuiltChatMessage {
   source: ChatMessageSource;
   /** True while an LLM call is in flight; false/undefined once settled. */
   pending?: boolean;
+  /** Attached to the opener line of a code-review exchange. */
+  quote?: ReviewQuote;
 }
 
 export interface MeetingSkeleton {

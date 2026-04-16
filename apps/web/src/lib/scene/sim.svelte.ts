@@ -16,18 +16,22 @@ import {
   type BuiltChatMessage,
   buildPendingMessages,
   type ChatMessageSource,
+  displayFor,
   type MeetingSkeleton,
   meetingSkeleton,
   mockLines,
   pairKey,
   pickAiIds,
+  type ReviewQuote,
 } from './chatter';
 import { MeetingLlmBridge, type MeetingFetcher } from './meetingLlm';
+import { ReviewLlmBridge, type ReviewFetcher, type ReviewTarget } from './reviewLlm';
 import { IntentRunner } from './directorIntents';
 import type { AgentIntentFetcher } from './directorLlm';
 import { advanceEmojiState, type EmojiBubble, type EmojiTrack, initialEmojiState } from './emojiBubbles';
 
 export type { MeetingFetcher, MeetingFetchInput, MeetingFetchResult } from './meetingLlm';
+export type { ReviewFetcher, ReviewFetchInput, ReviewFetchResult } from './reviewLlm';
 export type {
   AgentIntentFetcher,
   AgentIntentFetchInput,
@@ -45,6 +49,9 @@ const MEET_COOLDOWN_TICKS = 360;
 const CHAT_LOG_MAX = 120;
 const TYPING_MS = 1500;
 const BUBBLE_GAP_MS = 600;
+// Probability a qualifying meeting becomes a code-review exchange instead
+// of a regular greeting. Miss → falls through to MeetingLlmBridge.
+const REVIEW_ROLL_CHANCE = 0.7;
 
 export interface AgentPose {
   id: string;
@@ -60,6 +67,10 @@ export interface AgentSimOptions {
   fetchMeetingLines?: MeetingFetcher;
   /** When set, AI agents periodically ask the LLM director for next action. */
   fetchAgentIntent?: AgentIntentFetcher;
+  /** When set with a city slug, some meetings become code-review banter. */
+  fetchReviewLines?: ReviewFetcher;
+  /** Required for review flow — the city slug the review endpoint keys on. */
+  citySlug?: string;
 }
 
 interface Slot {
@@ -99,6 +110,9 @@ export class AgentSim {
   private lastAnyMeetAt = Number.NEGATIVE_INFINITY;
   private agentsById: Map<string, Agent>;
   private llmBridge: MeetingLlmBridge | null;
+  private reviewBridge: ReviewLlmBridge | null;
+  /** Commit shas available to the review flow — every AI agent carries one. */
+  private reviewableCommits: { sha: string; subject: string | null }[];
   private intentRunner: IntentRunner | null;
   // Independent spawn tracks for emojiBubbles (plain field — only the
   // bubble list needs reactivity).
@@ -119,6 +133,18 @@ export class AgentSim {
     this.llmBridge = options.fetchMeetingLines
       ? new MeetingLlmBridge({ fetcher: options.fetchMeetingLines, agentsById: this.agentsById, districtsById })
       : null;
+    this.reviewBridge =
+      options.fetchReviewLines && options.citySlug
+        ? new ReviewLlmBridge({
+            fetcher: options.fetchReviewLines,
+            citySlug: options.citySlug,
+          })
+        : null;
+    // Every agent is born from a commit; `agent.commitSha` is the key to
+    // the file patches. `message` carries the commit subject for the prompt.
+    this.reviewableCommits = world.agents
+      .map((a) => ({ sha: a.commitSha, subject: a.message ?? null }))
+      .filter((c): c is { sha: string; subject: string | null } => Boolean(c.sha));
     this.intentRunner = options.fetchAgentIntent
       ? new IntentRunner({
           fetcher: options.fetchAgentIntent,
@@ -217,23 +243,94 @@ export class AgentSim {
     this.appendChat(pendingOpener);
 
     const start = Date.now();
-    let resolved = this.llmBridge?.canUse()
-      ? await this.llmBridge.resolve(sk)
-      : null;
-    if (!resolved) {
+    let resolvedOpener: string | null = null;
+    let resolvedReply: string | null = null;
+    let resolvedSource: ChatMessageSource | null = null;
+    let resolvedQuote: ReviewQuote | null = null;
+
+    // Roll for the code-review path. Requires the review bridge, a rolling
+    // success on the probability check, and at least one commit to quote.
+    if (
+      this.reviewBridge?.canUse() &&
+      this.reviewableCommits.length > 0 &&
+      Math.random() < REVIEW_ROLL_CHANCE
+    ) {
+      const target = this.pickReviewTarget(sk);
+      if (target) {
+        const r = await this.reviewBridge.resolve(sk, target);
+        if (r) {
+          resolvedOpener = r.opener;
+          resolvedReply = r.reply;
+          resolvedSource = r.source;
+          resolvedQuote = r.quote;
+        }
+      }
+    }
+
+    // Fall through to the plain greeting bridge when the review path didn't
+    // materialise.
+    if (resolvedOpener === null) {
+      const greet = this.llmBridge?.canUse()
+        ? await this.llmBridge.resolve(sk)
+        : null;
+      if (greet) {
+        resolvedOpener = greet.opener;
+        resolvedReply = greet.reply;
+        resolvedSource = greet.source;
+      }
+    }
+
+    if (resolvedOpener === null || resolvedReply === null || resolvedSource === null) {
       const m = mockLines(sk.firstLabel, sk.secondLabel, sk.meetingId);
-      const source: ChatMessageSource = this.llmBridge ? 'llm-fallback' : 'mock';
-      resolved = { opener: m.opener, reply: m.reply, source };
+      const source: ChatMessageSource =
+        this.llmBridge || this.reviewBridge ? 'llm-fallback' : 'mock';
+      resolvedOpener = m.opener;
+      resolvedReply = m.reply;
+      resolvedSource = source;
     }
 
     const elapsed = Date.now() - start;
     if (elapsed < TYPING_MS) await sleep(TYPING_MS - elapsed);
-    this.patchMessage(sk.meetingId, 'opener', resolved.opener, resolved.source);
+    this.patchMessage(
+      sk.meetingId,
+      'opener',
+      resolvedOpener,
+      resolvedSource,
+      resolvedQuote,
+    );
 
     await sleep(BUBBLE_GAP_MS);
     this.appendChat(pendingReply);
     await sleep(TYPING_MS);
-    this.patchMessage(sk.meetingId, 'reply', resolved.reply, resolved.source);
+    this.patchMessage(sk.meetingId, 'reply', resolvedReply, resolvedSource, null);
+  }
+
+  /**
+   * Picks a commit sha to review and shapes the two speakers for the
+   * prompt. Both speakers are drawn from the same meeting — the LLM is told
+   * neither of them wrote the code, so author identity is irrelevant.
+   */
+  private pickReviewTarget(sk: MeetingSkeleton): ReviewTarget | null {
+    if (this.reviewableCommits.length === 0) return null;
+    const pick =
+      this.reviewableCommits[
+        Math.floor(Math.random() * this.reviewableCommits.length)
+      ];
+    if (!pick) return null;
+    const firstAgent = this.agentsById.get(sk.firstId);
+    const secondAgent = this.agentsById.get(sk.secondId);
+    return {
+      commitSha: pick.sha,
+      commitSubject: pick.subject,
+      reviewer: {
+        label: sk.firstLabel || displayFor(firstAgent),
+        personality: firstAgent?.personality ?? null,
+      },
+      developer: {
+        label: sk.secondLabel || displayFor(secondAgent),
+        personality: secondAgent?.personality ?? null,
+      },
+    };
   }
 
   private appendChat(msg: BuiltChatMessage): void {
@@ -260,11 +357,19 @@ export class AgentSim {
   }
 
   /** Settle one side of a pending exchange — `-a`/`-b` id suffix selects. */
-  private patchMessage(meetingId: string, which: 'opener' | 'reply', text: string, source: ChatMessageSource): void {
+  private patchMessage(
+    meetingId: string,
+    which: 'opener' | 'reply',
+    text: string,
+    source: ChatMessageSource,
+    quote: ReviewQuote | null,
+  ): void {
     const suffix = which === 'opener' ? '-a' : '-b';
     this.chatLog = this.chatLog.map((m) => {
       if (m.meetingId !== meetingId || !m.id.endsWith(suffix)) return m;
-      return { ...m, text, source, pending: false };
+      const next: BuiltChatMessage = { ...m, text, source, pending: false };
+      if (quote) next.quote = quote;
+      return next;
     });
   }
 

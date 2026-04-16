@@ -13,6 +13,7 @@ import { generateObject } from 'ai';
 import { z } from 'zod';
 import { log } from '@gitcolony/log';
 import { getModel, type LLMConfig } from './gemini.js';
+import { buildChatterPrompt } from './prompts.js';
 
 export interface MeetingAgent {
   label: string;               // displayName || login || id
@@ -55,7 +56,7 @@ export async function generateMeetingLines(
       model: getModel(config),
       schema: ResponseSchema,
       maxRetries: 1,
-      prompt: buildPrompt(first, second, context),
+      prompt: buildChatterPrompt(first, second, context),
     });
     return { opener: object.opener, reply: object.reply };
   } catch (err) {
@@ -68,34 +69,3 @@ export async function generateMeetingLines(
   }
 }
 
-function buildPrompt(
-  first: MeetingAgent,
-  second: MeetingAgent,
-  context: MeetingContext,
-): string {
-  return [
-    'You voice two inhabitants of a stylized city built from a software repository.',
-    'They just crossed paths on the street and exchange two short lines.',
-    '',
-    'Rules:',
-    '- opener: comes from the first inhabitant. Greets or acknowledges the second by their label when natural.',
-    '- reply: comes from the second inhabitant. Addresses the first or riffs on the opener.',
-    '- Each line: 1 sentence, English, under 100 characters, no trailing period if you can help it.',
-    '- Voice reflects the inhabitant\'s personality and their district. Keep it warm and grounded.',
-    '- No emoji. Do not mention git, code, commits, or the word "AI".',
-    '- Do not put quotes around the lines; return raw sentences.',
-    '',
-    `First inhabitant: label=${first.label} | district=${first.districtName ?? 'unknown'} | vibe=${first.personality ?? 'steady citizen'} | from commit="${truncate(first.commitSubject ?? '', 80)}"`,
-    `Second inhabitant: label=${second.label} | district=${second.districtName ?? 'unknown'} | vibe=${second.personality ?? 'steady citizen'} | from commit="${truncate(second.commitSubject ?? '', 80)}"`,
-    context.districtName
-      ? `They meet on a street in: ${context.districtName}`
-      : 'They meet on a city street.',
-    context.timeOfDay ? `Time of day: ${context.timeOfDay}` : '',
-  ]
-    .filter(Boolean)
-    .join('\n');
-}
-
-function truncate(s: string, n: number): string {
-  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
-}

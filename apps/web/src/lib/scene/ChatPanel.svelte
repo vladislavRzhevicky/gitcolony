@@ -111,6 +111,17 @@
                     <span class="msg__time">{relTime(m.at)}</span>
                   </span>
                 </div>
+                {#if m.quote}
+                  <figure class="msg__quote mono" aria-label="code snippet">
+                    <figcaption class="msg__quote-head">
+                      <span class="msg__quote-file">{m.quote.filename}</span>
+                      <span class="msg__quote-lines">
+                        L{m.quote.startLine}–{m.quote.startLine + m.quote.lines.length - 1}
+                      </span>
+                    </figcaption>
+                    <pre class="msg__quote-body">{#each m.quote.lines as line, i}<span class="msg__quote-row"><span class="msg__quote-ln">{m.quote.startLine + i}</span><span class="msg__quote-code">{line || ' '}</span></span>{/each}</pre>
+                  </figure>
+                {/if}
                 <p class="msg__text" class:msg__text--pending={m.pending}>
                   {#if m.pending}
                     <span class="dots" aria-label="thinking">
@@ -135,6 +146,10 @@
     right: var(--space-4);
     bottom: var(--space-4);
     width: 320px;
+    /* Clamp in both directions. The min prevents edge cases where a
+       reactive re-mount produces a zero-height flex container before
+       content arrives (the panel would be invisible until first message). */
+    min-height: 44px;
     max-height: min(52vh, 480px);
     display: flex;
     flex-direction: column;
@@ -143,7 +158,9 @@
     border-radius: var(--radius-md);
     backdrop-filter: blur(8px);
     overflow: hidden;
-    z-index: 4;
+    /* Sits above Ticker (z:4), status/rail (z:3), overlay (z:2). Top bar
+       stays at z:10 so it always wins. */
+    z-index: 6;
   }
   .panel--collapsed {
     max-height: none;
@@ -197,7 +214,14 @@
 
   .panel__list {
     flex: 1;
+    /* min-height/min-width: 0 lets the flex child actually shrink below
+       intrinsic content size. Without these, a wide code snippet (`<pre>`
+       with `white-space: pre`) can force the list — and the whole panel —
+       to stretch past 320px and off the viewport. */
+    min-height: 0;
+    min-width: 0;
     overflow-y: auto;
+    overflow-x: hidden;
     padding: var(--space-3) var(--space-4);
     display: flex;
     flex-direction: column;
@@ -217,6 +241,7 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
+    min-width: 0;
     padding-bottom: var(--space-3);
     border-bottom: var(--stroke-w) dashed color-mix(in srgb, var(--stroke) 70%, transparent);
   }
@@ -229,6 +254,7 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+    min-width: 0;
   }
   .msg__who {
     display: flex;
@@ -266,6 +292,62 @@
     font-size: var(--fs-sm);
     color: var(--fg-0);
     line-height: 1.45;
+  }
+
+  /* Code-review quote block. Sits between the speaker header and their
+     reply so both coworkers appear to react to the same visible snippet.
+     Monospace, muted background, line numbers flush-left. */
+  .msg__quote {
+    margin: 4px 0 2px;
+    padding: 0;
+    border: var(--stroke-w) solid color-mix(in srgb, var(--stroke) 80%, transparent);
+    border-radius: var(--radius-sm, 6px);
+    background: color-mix(in srgb, var(--bg-2) 80%, transparent);
+    overflow: hidden;
+  }
+  .msg__quote-head {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: 3px var(--space-2);
+    font-size: 10px;
+    color: var(--fg-1);
+    background: color-mix(in srgb, var(--bg-1) 50%, transparent);
+    border-bottom: var(--stroke-w) solid color-mix(in srgb, var(--stroke) 60%, transparent);
+  }
+  .msg__quote-file {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--fg-0);
+  }
+  .msg__quote-lines {
+    flex: 0 0 auto;
+    opacity: 0.7;
+  }
+  .msg__quote-body {
+    margin: 0;
+    padding: 4px 0;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--fg-0);
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .msg__quote-row {
+    display: flex;
+  }
+  .msg__quote-ln {
+    flex: 0 0 28px;
+    text-align: right;
+    padding: 0 6px 0 4px;
+    color: var(--fg-1);
+    opacity: 0.55;
+    user-select: none;
+  }
+  .msg__quote-code {
+    flex: 1;
+    padding-right: var(--space-2);
   }
   .msg__text--pending {
     color: var(--fg-1);

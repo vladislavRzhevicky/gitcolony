@@ -13,6 +13,7 @@ import { generateObject } from 'ai';
 import { z } from 'zod';
 import { log } from '@gitcolony/log';
 import { getModel, type LLMConfig } from './gemini.js';
+import { buildNamingPrompt } from './prompts.js';
 
 export interface NameInput {
   id: string;
@@ -72,28 +73,4 @@ export async function generateNames(
     }
   }
   return out;
-}
-
-function buildNamingPrompt(items: readonly NameInput[]): string {
-  const lines = items.map(
-    (it) =>
-      `- id=${it.id} | district=${it.districtName} | type=${it.semanticType} | variant=${it.variant} | commit="${truncate(it.commitMessage, 140)}"`,
-  );
-  return [
-    'You name buildings for a stylized city built from a software repository.',
-    'Each building represents one git commit. Give it a short evocative name and a one-line tagline.',
-    '',
-    'Rules:',
-    '- displayName: 1-3 words, English, Title Case, max 24 chars. Suggest the building type (workshop, hall, library, tower, clinic, archive, depot, etc.) without being literal.',
-    '- tagline: one sentence, English, max 60 chars, no trailing period. Hint at what the commit changed but in city-flavor language. No emoji.',
-    '- Do not echo the commit hash. Do not mention git, code, or commits explicitly.',
-    '- Each input has a stable id; respond with the same id verbatim.',
-    '',
-    'Buildings:',
-    ...lines,
-  ].join('\n');
-}
-
-function truncate(s: string, n: number): string {
-  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }

@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { log } from '@gitcolony/log';
 import type { TickerEvent } from '@gitcolony/schema';
 import { getModel, type LLMConfig } from './gemini.js';
+import { buildTickerPrompt } from './prompts.js';
 
 export interface TickerCommitInput {
   sha: string;
@@ -91,54 +92,3 @@ export async function generateTicker(
   }
 }
 
-function buildTickerPrompt(input: TickerInput): string {
-  const commits = input.commits
-    .slice(0, 20)
-    .map(
-      (c) =>
-        `- sha=${c.sha} | author=${c.author ?? 'anon'} | district=${c.districtName ?? 'unknown'} | type=${c.semanticType} | "${truncate(c.message, 140)}"`,
-    );
-
-  // Cap roster sizes so the prompt stays small. Pick agents that have a
-  // displayName first — they make better scene actors than anonymous ones.
-  const agents = [...input.agents]
-    .sort((a, b) => Number(!!b.displayName) - Number(!!a.displayName))
-    .slice(0, 30)
-    .map(
-      (a) =>
-        `- id=${a.id} | name=${a.displayName ?? '(anon)'} | district=${a.districtName} | personality="${truncate(a.personality ?? '', 100)}"`,
-    );
-
-  const objects = [...input.objects]
-    .filter((o) => o.displayName)
-    .slice(0, 30)
-    .map(
-      (o) =>
-        `- id=${o.id} | name=${o.displayName} | district=${o.districtName}`,
-    );
-
-  return [
-    'You are the city ticker for a software-repository-as-city visualisation.',
-    'Compose 5-10 short, present-tense scenes from the most recent commits and the roster below.',
-    '',
-    'Rules:',
-    '- text: one sentence per event, English, max 110 chars, no trailing period, no emoji.',
-    '- Reference inhabitants by displayName when you know one; otherwise mention the author handle as @handle.',
-    '- When an event clearly involves a roster agent or building, set agentId / objectId to its id from the roster.',
-    '- commitSha and author should match the source commit when applicable.',
-    '- Mix moods: a couple of construction events, a couple of social events, the rest commit-derived news.',
-    '',
-    'Recent commits:',
-    ...commits,
-    '',
-    'Inhabitants on file:',
-    ...(agents.length > 0 ? agents : ['(none)']),
-    '',
-    'Named buildings:',
-    ...(objects.length > 0 ? objects : ['(none)']),
-  ].join('\n');
-}
-
-function truncate(s: string, n: number): string {
-  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
-}

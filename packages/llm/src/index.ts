@@ -29,10 +29,16 @@ export {
 } from './chatter.js';
 export {
   pickAgentIntent,
-  AgentIntentSchema,
   type AgentIntent,
   type DirectorAgent,
   type DirectorDistrict,
   type DirectorPeer,
   type DirectorInput,
 } from './director.js';
+export {
+  generateCodeReview,
+  type CodeReviewAgent,
+  type CodeReviewSnippet,
+  type CodeReviewInput,
+  type CodeReviewLines,
+} from './review.js';
