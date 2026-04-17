@@ -1,4 +1,4 @@
-import type { District, TilePos, WorldObject } from '@gitcolony/schema';
+import type { District, Rect, TilePos, WorldObject } from '@gitcolony/schema';
 
 // ============================================================================
 // Grid primitives — tile masks and collision-resolved placement.
@@ -48,12 +48,30 @@ export function setBit(m: GridMask, x: number, y: number, value: 0 | 1): void {
  */
 export type FootprintShape = readonly TilePos[];
 
+export const FOOTPRINT_DECOR_1x1: FootprintShape = [{ x: 0, y: 0 }];
+
+export const FOOTPRINT_BUILDING_1x1: FootprintShape = [{ x: 0, y: 0 }];
+
 export const FOOTPRINT_BUILDING_2x1: FootprintShape = [
   { x: 0, y: 0 },
   { x: 1, y: 0 },
 ];
 
-export const FOOTPRINT_DECOR_1x1: FootprintShape = [{ x: 0, y: 0 }];
+export const FOOTPRINT_BUILDING_2x2: FootprintShape = [
+  { x: 0, y: 0 },
+  { x: 1, y: 0 },
+  { x: 0, y: 1 },
+  { x: 1, y: 1 },
+];
+
+export const FOOTPRINT_BUILDING_3x2: FootprintShape = [
+  { x: 0, y: 0 },
+  { x: 1, y: 0 },
+  { x: 2, y: 0 },
+  { x: 0, y: 1 },
+  { x: 1, y: 1 },
+  { x: 2, y: 1 },
+];
 
 export function absoluteFootprint(
   anchor: TilePos,
@@ -93,16 +111,58 @@ export interface BBox {
   y1: number; // inclusive
 }
 
+/**
+ * Union bounding box of every block in the district, clamped to the grid.
+ * For single-block districts this is just the block itself; for multi-block
+ * districts it over-approximates (an L-shape yields a filled rectangle).
+ * Consumers that need strict per-block iteration should use `districtBlocks`.
+ */
 export function districtBBox(d: District, grid: GridSize): BBox {
-  const hw = Math.floor(d.sizeInTiles.w / 2);
-  const hh = Math.floor(d.sizeInTiles.h / 2);
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const b of d.blocks) {
+    if (b.x0 < x0) x0 = b.x0;
+    if (b.y0 < y0) y0 = b.y0;
+    if (b.x1 > x1) x1 = b.x1;
+    if (b.y1 > y1) y1 = b.y1;
+  }
   return {
-    x0: Math.max(0, d.center.x - hw),
-    y0: Math.max(0, d.center.y - hh),
-    x1: Math.min(grid.w - 1, d.center.x - hw + d.sizeInTiles.w - 1),
-    y1: Math.min(grid.h - 1, d.center.y - hh + d.sizeInTiles.h - 1),
+    x0: Math.max(0, x0),
+    y0: Math.max(0, y0),
+    x1: Math.min(grid.w - 1, x1),
+    y1: Math.min(grid.h - 1, y1),
   };
 }
+
+/** Individual block rectangles, clamped to the grid. */
+export function districtBlocks(d: District, grid: GridSize): BBox[] {
+  const out: BBox[] = [];
+  for (const b of d.blocks) {
+    const x0 = Math.max(0, b.x0);
+    const y0 = Math.max(0, b.y0);
+    const x1 = Math.min(grid.w - 1, b.x1);
+    const y1 = Math.min(grid.h - 1, b.y1);
+    if (x0 > x1 || y0 > y1) continue;
+    out.push({ x0, y0, x1, y1 });
+  }
+  return out;
+}
+
+/** Does a tile sit inside any of the district's blocks? */
+export function tileInDistrict(d: District, pos: TilePos): boolean {
+  for (const b of d.blocks) {
+    if (pos.x >= b.x0 && pos.x <= b.x1 && pos.y >= b.y0 && pos.y <= b.y1) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Re-exported so consumers outside core don't need to pull the schema types
+// just to name them. Rect is the schema-level tile rectangle.
+export type { Rect };
 
 // ----------------------------------------------------------------------------
 // Placement search

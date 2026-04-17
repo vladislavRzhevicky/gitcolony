@@ -12,6 +12,7 @@
     "./seed": "./src/seed.ts",
     "./rng": "./src/rng.ts",
     "./sim": "./src/sim.ts",
+    "./grid": "./src/grid.ts",
     "./names": "./src/names.ts",
     "./code-hunks": "./src/codeHunks.ts"
   },

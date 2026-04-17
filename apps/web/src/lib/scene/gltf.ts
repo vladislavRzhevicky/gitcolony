@@ -27,6 +27,13 @@ const templates = new Map<string, Promise<LoadedTemplate>>();
 // can fit-to-footprint without re-running Box3.setFromObject per instance.
 const extents = new Map<string, Vector3>();
 
+// URL -> cached bbox center (x,y,z) in the template's native units. Some
+// packs ship GLBs with geometry offset from origin (the city-free road pack
+// does this — the intersection is centered near (-7, *, -19) instead of
+// (0,0,0)). Consumers that position by tile centroid need to subtract this
+// offset (scaled) from their placement to keep geometry over the tile.
+const centers = new Map<string, Vector3>();
+
 export function loadTemplate(url: string): Promise<LoadedTemplate> {
   const cached = templates.get(url);
   if (cached) return cached;
@@ -72,11 +79,34 @@ export async function cloneWithAnimations(
 export async function templateExtent(url: string): Promise<Vector3> {
   const cached = extents.get(url);
   if (cached) return cached;
+  await measureTemplate(url);
+  // biome-ignore lint/style/noNonNullAssertion: measureTemplate populated it
+  return extents.get(url)!;
+}
+
+/**
+ * Cached bbox center of a loaded template (native units). Non-zero when the
+ * GLB ships geometry offset from the scene origin — subtract (center * scale)
+ * from the placement position to keep the rendered mesh over the desired
+ * world location.
+ */
+export async function templateCenter(url: string): Promise<Vector3> {
+  const cached = centers.get(url);
+  if (cached) return cached;
+  await measureTemplate(url);
+  // biome-ignore lint/style/noNonNullAssertion: measureTemplate populated it
+  return centers.get(url)!;
+}
+
+async function measureTemplate(url: string): Promise<void> {
   const tpl = await loadTemplate(url);
+  const box = new Box3().setFromObject(tpl.scene);
   const size = new Vector3();
-  new Box3().setFromObject(tpl.scene).getSize(size);
+  box.getSize(size);
+  const center = new Vector3();
+  box.getCenter(center);
   extents.set(url, size);
-  return size;
+  centers.set(url, center);
 }
 
 /**

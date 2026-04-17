@@ -9,7 +9,15 @@
 -->
 <script lang="ts">
   import { invalidateAll } from '$app/navigation';
-  import { Button, Card, Chip, NewCityDialog, TopBar, UserBadge } from '$lib/components';
+  import {
+    Button,
+    Card,
+    Chip,
+    ConfirmDialog,
+    NewCityDialog,
+    TopBar,
+    UserBadge,
+  } from '$lib/components';
   import { relativeTime } from '$lib/time';
   import type { PageData } from './$types';
 
@@ -22,7 +30,11 @@
   // Per-row busy flag keyed by slug so clicking Sync on one card doesn't
   // disable the others.
   let syncing = $state<Record<string, boolean>>({});
+  let deleting = $state<Record<string, boolean>>({});
   let rowError = $state<Record<string, string | null>>({});
+  // Only one delete confirmation can be open at a time — identified by the
+  // city slug (stable, human-unique in the URL). `null` = no dialog open.
+  let confirmDeleteSlug = $state<string | null>(null);
 
   async function onSync(slug: string) {
     if (syncing[slug]) return;
@@ -40,6 +52,27 @@
       };
     } finally {
       syncing = { ...syncing, [slug]: false };
+    }
+  }
+
+  async function onDelete(slug: string) {
+    if (deleting[slug]) return;
+    deleting = { ...deleting, [slug]: true };
+    rowError = { ...rowError, [slug]: null };
+    try {
+      const res = await fetch(`/api/cities/${slug}`, { method: 'DELETE' });
+      if (!res.ok && res.status !== 204) throw new Error(`HTTP ${res.status}`);
+      confirmDeleteSlug = null;
+      // Drop the card from the list.
+      await invalidateAll();
+    } catch (e) {
+      rowError = {
+        ...rowError,
+        [slug]: e instanceof Error ? e.message : 'failed to delete',
+      };
+      confirmDeleteSlug = null;
+    } finally {
+      deleting = { ...deleting, [slug]: false };
     }
   }
 
@@ -176,6 +209,25 @@
                 >
                   {syncing[city.slug] ? 'Syncing…' : running ? 'Generating…' : 'Sync'}
                 </Button>
+                <button
+                  type="button"
+                  class="row__delete"
+                  aria-label="Delete colony"
+                  data-tip="Delete"
+                  disabled={deleting[city.slug]}
+                  onclick={() => (confirmDeleteSlug = city.slug)}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14zM10 11v6M14 11v6"
+                    />
+                  </svg>
+                </button>
               </div>
             </div>
           </Card>
@@ -186,6 +238,23 @@
 </main>
 
 <NewCityDialog open={dialogOpen} onClose={() => (dialogOpen = false)} />
+
+{#if confirmDeleteSlug}
+  {@const slug = confirmDeleteSlug}
+  {@const city = data.cities.find((c: { slug: string }) => c.slug === slug)}
+  <ConfirmDialog
+    open={true}
+    title="Delete colony?"
+    message={city
+      ? `The world, agents, and ingested commit history for ${city.repoFullName} will be permanently removed. This cannot be undone.`
+      : 'This colony will be permanently removed. This cannot be undone.'}
+    confirmLabel="Delete"
+    variant="danger"
+    busy={!!deleting[slug]}
+    onConfirm={() => onDelete(slug)}
+    onCancel={() => (confirmDeleteSlug = null)}
+  />
+{/if}
 
 <style>
   .signout {
@@ -357,6 +426,63 @@
     display: flex;
     gap: var(--space-2);
     align-items: center;
+  }
+  /* Icon-only delete. Destructive color reveals on hover/focus so the row
+     doesn't scream "danger" at rest. Uses --danger from the design tokens
+     to stay consistent with Button variant="danger". */
+  .row__delete {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius-md);
+    background: transparent;
+    border: var(--stroke-w) solid transparent;
+    color: var(--fg-1);
+    cursor: pointer;
+    transition:
+      color var(--dur-fast) var(--ease-out),
+      background var(--dur-fast) var(--ease-out),
+      border-color var(--dur-fast) var(--ease-out);
+  }
+  .row__delete:hover:not(:disabled),
+  .row__delete:focus-visible {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+    border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  }
+  .row__delete:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .row__delete svg {
+    width: 18px;
+    height: 18px;
+  }
+  .row__delete[data-tip]::after {
+    content: attr(data-tip);
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 4px 8px;
+    background: var(--bg-2);
+    border: var(--stroke-w) solid var(--stroke);
+    border-radius: var(--radius-md);
+    font-family: var(--font-ui);
+    font-size: var(--fs-xs);
+    color: var(--fg-0);
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--dur-fast) var(--ease-out);
+    z-index: 20;
+  }
+  .row__delete[data-tip]:hover::after,
+  .row__delete[data-tip]:focus-visible::after {
+    opacity: 1;
   }
 
   .empty {

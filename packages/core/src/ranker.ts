@@ -140,16 +140,34 @@ export function pickPrimaryPath(c: Commit, depth = 1): string | null {
 }
 
 // ----------------------------------------------------------------------------
-// Tier mapping
+// Tier mapping — percentile-based
+//
+// Absolute score thresholds turned every conventional-free repo into a city
+// of tiny decor because mid-size commits rarely crossed the B line. With
+// percentiles, tier-A/B counts track repo activity directly: the top 5 %
+// always become agents, the next 35 % always become buildings, regardless
+// of whether the project uses `feat:`-style messages.
+//
+//   top  5 %  -> A (agents)
+//   next 35 % -> B (buildings)
+//   next 35 % -> C (decor)
+//   rest      -> D (decor, sparse)
+//
+// Noisy commits (lockfiles, bots, merges, formatting) are forced to D
+// before the percentile pass so they don't push real work out of the top
+// bands.
 // ----------------------------------------------------------------------------
 
-// Thresholds tuned so mid-size commits without conventional discipline can
-// still become buildings. Previous cutoffs (55/35/15) left large repos with
-// <5% tier-B — cities stayed tiny no matter how many commits were ingested.
-function scoreToTier(score: number): Tier {
-  if (score >= 50) return 'A';
-  if (score >= 25) return 'B';
-  if (score >= 10) return 'C';
+const PERCENTILE_A = 0.05;
+const PERCENTILE_B = 0.40;
+const PERCENTILE_C = 0.75;
+
+function tierByRank(rank: number, total: number): Tier {
+  if (total <= 0) return 'D';
+  const p = rank / total;
+  if (p < PERCENTILE_A) return 'A';
+  if (p < PERCENTILE_B) return 'B';
+  if (p < PERCENTILE_C) return 'C';
   return 'D';
 }
 
@@ -157,31 +175,60 @@ function scoreToTier(score: number): Tier {
 // Public API
 // ----------------------------------------------------------------------------
 
-export function rankCommit(c: Commit): RankedCommit {
+// Intermediate shape used inside rankAll — tier is assigned by the
+// percentile pass after all commits have been scored.
+function scoreOne(c: Commit): RankedCommit {
   const semantic = classifySemantic(c.message);
   const rawScore = sizeScore(c) + semanticScore(semantic);
-  let tier: Tier = scoreToTier(rawScore);
-
-  // Hard overrides
-  if (isNoisy(c)) tier = 'D';
-
   return {
     ...c,
-    tier,
+    tier: 'D',
     score: rawScore,
     semanticType: semantic,
     primaryPath: pickPrimaryPath(c),
   };
 }
 
+// Every colony should have a cast of characters, so even a tiny repo whose
+// percentile math yields zero tier-A commits gets its top N promoted. Picked
+// to read as "a family" at a glance in the scene.
+const MIN_TIER_A = 3;
+
 export function rankAll(commits: readonly Commit[]): RankedCommit[] {
-  const out = commits.map(rankCommit);
-  // Promote the very first commit of the repo (oldest) to Tier A — ceremony rule.
-  if (out.length > 0) {
-    const first = out.reduce((acc, cur) =>
-      cur.authoredAt < acc.authoredAt ? cur : acc,
-    );
-    first.tier = 'A';
+  const out = commits.map(scoreOne);
+  if (out.length === 0) return out;
+
+  // Filter out noisy commits — they stay locked at the 'D' tier assigned in
+  // scoreOne regardless of where their score would place them.
+  const real = out.filter((c) => !isNoisy(c));
+
+  // Rank the real commits by score (desc) and assign tiers by percentile
+  // position. Ties break by sha so the ordering is deterministic.
+  real.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.sha < b.sha ? -1 : a.sha > b.sha ? 1 : 0;
+  });
+  for (let i = 0; i < real.length; i++) {
+    real[i]!.tier = tierByRank(i, real.length);
+  }
+
+  // Ceremony rule: the repo's oldest commit is always Tier A.
+  const first = out.reduce((acc, cur) =>
+    cur.authoredAt < acc.authoredAt ? cur : acc,
+  );
+  first.tier = 'A';
+
+  // Population floor: promote highest-scoring non-A commits until the
+  // colony has MIN_TIER_A residents (or the repo runs out of commits).
+  let tierACount = out.reduce((n, c) => (c.tier === 'A' ? n + 1 : n), 0);
+  if (tierACount < MIN_TIER_A && out.length > tierACount) {
+    // Walk `real` in score order — it's already sorted; skip those already A.
+    for (const c of real) {
+      if (tierACount >= MIN_TIER_A) break;
+      if (c.tier === 'A') continue;
+      c.tier = 'A';
+      tierACount++;
+    }
   }
   return out;
 }

@@ -49,7 +49,7 @@ export function buildSimWalkable(world: Pick<World, 'grid' | 'objects'>): GridMa
 export function buildRoadMask(world: Pick<World, 'grid' | 'roads'>): GridMask {
   const m = createMask(world.grid);
   for (const path of world.roads) {
-    for (const t of path) setBit(m, t.x, t.y, 1);
+    for (const t of path.tiles) setBit(m, t.x, t.y, 1);
   }
   return m;
 }

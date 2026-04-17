@@ -164,6 +164,11 @@
   // units. Used to size the ground plane and frame the camera so the
   // populated area always fills the canvas, regardless of how sparsely
   // districts are spread inside the (fixed-size) generation grid.
+  //
+  // Post-BSP: districts carry `blocks: Rect[]` (one or more axis-aligned
+  // tile rectangles). We union every block's world-space footprint so
+  // multi-block (L-shape) districts contribute their full area, not just
+  // a bounding rectangle.
   const cityBounds = $derived.by(() => {
     const populated = new Set<string>();
     for (const o of world.objects) populated.add(o.districtId);
@@ -179,20 +184,23 @@
     let minZ = Infinity;
     let maxZ = -Infinity;
     for (const d of relevant) {
-      // Match the pad placement: compute the bbox rectangle instead of
-      // treating the center tile's center as the pad midpoint. For even
-      // districtSize the two differ by half a tile.
-      const hw = Math.floor(d.sizeInTiles.w / 2);
-      const hh = Math.floor(d.sizeInTiles.h / 2);
-      const bboxCx = d.center.x - hw + (d.sizeInTiles.w - 1) / 2;
-      const bboxCy = d.center.y - hh + (d.sizeInTiles.h - 1) / 2;
-      const c = tileToWorld({ x: bboxCx, y: bboxCy }, world.grid, 0);
-      const halfW = (d.sizeInTiles.w / 2) * TILE_SIZE;
-      const halfD = (d.sizeInTiles.h / 2) * TILE_SIZE;
-      if (c.x - halfW < minX) minX = c.x - halfW;
-      if (c.x + halfW > maxX) maxX = c.x + halfW;
-      if (c.z - halfD < minZ) minZ = c.z - halfD;
-      if (c.z + halfD > maxZ) maxZ = c.z + halfD;
+      for (const b of d.blocks) {
+        // Rect is inclusive tile coords. A block spans from the W edge of
+        // tile (x0,y0) to the E edge of tile (x1,y1); that's a width of
+        // (x1-x0+1) tiles. We compute the block's world-space rectangle
+        // centered on the block's tile-center.
+        const tw = b.x1 - b.x0 + 1;
+        const th = b.y1 - b.y0 + 1;
+        const cx = (b.x0 + b.x1) / 2;
+        const cy = (b.y0 + b.y1) / 2;
+        const c = tileToWorld({ x: cx, y: cy }, world.grid, 0);
+        const halfW = (tw / 2) * TILE_SIZE;
+        const halfD = (th / 2) * TILE_SIZE;
+        if (c.x - halfW < minX) minX = c.x - halfW;
+        if (c.x + halfW > maxX) maxX = c.x + halfW;
+        if (c.z - halfD < minZ) minZ = c.z - halfD;
+        if (c.z + halfD > maxZ) maxZ = c.z + halfD;
+      }
     }
     if (!Number.isFinite(minX)) {
       minX = -world.grid.w / 2;
@@ -272,46 +280,62 @@
   // the gap at any HEX_FLAT ≤ 2.
   const PLATFORM_BLEED = 2;
 
-  // Pre-compute district bounds once per world change. Invariant #2:
+  // Pre-compute district pads once per world change. Invariant #2:
   // districts are immutable on sync, so this stays stable between
   // ingestion events.
   //
-  // The pad is positioned against the district's bbox rectangle rather than
-  // the center tile. For odd districtSize these two coincide; for even
-  // districtSize the tile-center is offset half a tile from the bbox center
-  // (because `districtBBox` anchors with `floor(W/2)`), so using the tile
-  // center here would bleed the pad half a tile onto the adjacent road.
-  // Apply the same weather darkening to arbitrary pad colors so every
-  // "paved" surface (platform + district pads) tints together. Without
-  // this the pads (previously Standard-lit) and the platform (Basic +
-  // manual tint) would drift apart under rain/storm.
+  // One pad per block — multi-block (L-shape) districts emit N rects so
+  // the notch stays visible instead of being filled by an over-sized
+  // bounding rectangle. Parks get a slightly greener hue to read as
+  // open lawn rather than paved ground.
+  //
+  // Apply the same weather darkening to pad colors so every "paved"
+  // surface (platform + district pads) tints together. Without this
+  // the pads and the platform (Basic + manual tint) would drift apart
+  // under rain/storm.
   function tintForWeather(hex: string): string {
     const t = PLATFORM_TINT[weather];
     const c = new Color(hex).multiplyScalar(t.mul);
     return c.lerp(new Color(t.mix), t.mixAmount).getStyle();
   }
 
-  const districtPads = $derived(
-    world.districts.map((d) => {
-      const hw = Math.floor(d.sizeInTiles.w / 2);
-      const hh = Math.floor(d.sizeInTiles.h / 2);
-      const bboxCx = d.center.x - hw + (d.sizeInTiles.w - 1) / 2;
-      const bboxCy = d.center.y - hh + (d.sizeInTiles.h - 1) / 2;
-      const center = tileToWorld({ x: bboxCx, y: bboxCy }, world.grid, 0.02);
+  interface PadSpec {
+    id: string;
+    center: { x: number; y: number; z: number };
+    width: number;
+    depth: number;
+    color: string;
+  }
+
+  const districtPads = $derived.by<PadSpec[]>(() => {
+    const pads: PadSpec[] = [];
+    for (const d of world.districts) {
       const base = d.isGraveyard
         ? COLORS.graveyardGround
         : d.isOutskirts
           ? COLORS.outskirtsGround
-          : COLORS.districtGround;
-      return {
-        id: d.id,
-        center,
-        width: d.sizeInTiles.w * TILE_SIZE,
-        depth: d.sizeInTiles.h * TILE_SIZE,
-        color: tintForWeather(base),
-      };
-    }),
-  );
+          : d.theme === 'park'
+            ? COLORS.districtGround
+            : COLORS.districtGround;
+      const color = tintForWeather(base);
+      for (let i = 0; i < d.blocks.length; i++) {
+        const b = d.blocks[i]!;
+        const tw = b.x1 - b.x0 + 1;
+        const th = b.y1 - b.y0 + 1;
+        const cx = (b.x0 + b.x1) / 2;
+        const cy = (b.y0 + b.y1) / 2;
+        const center = tileToWorld({ x: cx, y: cy }, world.grid, 0.02);
+        pads.push({
+          id: `${d.id}-${i}`,
+          center,
+          width: tw * TILE_SIZE,
+          depth: th * TILE_SIZE,
+          color,
+        });
+      }
+    }
+    return pads;
+  });
 </script>
 
 <!-- Camera + controls. `far` is bumped past the Sky box scale (10000)

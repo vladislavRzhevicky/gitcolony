@@ -24,7 +24,14 @@ export function pairKey(a: string, b: string): string {
 }
 
 /**
- * Selects every Nth agent (by sorted id) as AI-controlled. Deterministic
+ * Every colony should have a handful of AI-driven characters so the chatter
+ * panel is never empty on small repos. Picked to read as a recurring cast.
+ */
+const MIN_AI_IDS = 3;
+
+/**
+ * Selects roughly every Nth agent (by sorted id) as AI-controlled, but never
+ * fewer than MIN_AI_IDS so tiny colonies still have a talking cast. Deterministic
  * across sessions for a given world, so the same swarm always materialises.
  *
  * We sort by id — stable across `initAgentRuntimes` because the schema ids
@@ -33,9 +40,17 @@ export function pairKey(a: string, b: string): string {
  */
 export function pickAiIds(agents: readonly Agent[], everyNth = 5): Set<string> {
   const ids = agents.map((a) => a.id).sort();
+  if (ids.length === 0) return new Set();
+  const target = Math.min(
+    ids.length,
+    Math.max(MIN_AI_IDS, Math.floor(ids.length / everyNth)),
+  );
   const out = new Set<string>();
-  for (let i = everyNth - 1; i < ids.length; i += everyNth) {
-    out.add(ids[i]!);
+  // Evenly spaced indices across the sorted list — deterministic and keeps
+  // the picks from clustering at one end of the id space.
+  for (let i = 0; i < target; i++) {
+    const idx = Math.floor(((i + 1) * ids.length) / (target + 1));
+    out.add(ids[Math.min(idx, ids.length - 1)]!);
   }
   return out;
 }

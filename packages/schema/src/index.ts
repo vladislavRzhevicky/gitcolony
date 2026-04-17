@@ -97,6 +97,17 @@ export const TilePosSchema = z.object({
 });
 export type TilePos = z.infer<typeof TilePosSchema>;
 
+// Inclusive tile rectangle. A district is one or more such rectangles so the
+// city carver can compose L-shapes / long strips out of adjacent BSP cells
+// without the schema locking everything to a single square pad.
+export const RectSchema = z.object({
+  x0: z.number().int().nonnegative(),
+  y0: z.number().int().nonnegative(),
+  x1: z.number().int().nonnegative(),
+  y1: z.number().int().nonnegative(),
+});
+export type Rect = z.infer<typeof RectSchema>;
+
 export const DistrictSchema = z.object({
   id: z.string(), // e.g. "d-frontend", "d-outskirts", "d-graveyard"
   name: z.string(),
@@ -106,12 +117,14 @@ export const DistrictSchema = z.object({
   // memorialize; otherwise absent. Assets come exclusively from the Kenney
   // Graveyard Kit.
   isGraveyard: z.boolean().default(false),
+  // Geometry: the district covers the union of these rectangles. `center` is
+  // the centroid of that union (deterministic, cached at generation) and is
+  // consumed by camera framing and sim POI fallback.
   center: TilePosSchema,
-  sizeInTiles: z.object({
-    w: z.number().int().positive(),
-    h: z.number().int().positive(),
-  }),
-  theme: z.string(), // MVP: 'generic' for regular, 'graveyard' for graveyard
+  blocks: z.array(RectSchema).min(1),
+  // 'generic' | 'graveyard' | 'outskirts' | 'park'. Park districts hold no
+  // commit-driven buildings — they exist to break up the grid visually.
+  theme: z.string(),
 });
 
 export type District = z.infer<typeof DistrictSchema>;
@@ -138,10 +151,6 @@ export const WorldObjectSchema = z.object({
   anchor: TilePosSchema,
   // footprint tiles that block movement; single-tile for decor.
   footprint: z.array(TilePosSchema).min(1),
-  // Visual height in arbitrary units. Consumed by the Threlte renderer to
-  // extrude tier-B boxes; derived from commit weight (additions+deletions).
-  // Optional because tier C/D decor has no per-object height.
-  height: z.number().positive().optional(),
   // LLM-authored fields (phase: naming). Null when the LLM call failed or
   // was skipped (no API key). Always optional so older worlds deserialize.
   displayName: z.string().nullable().optional(),
@@ -221,10 +230,17 @@ export const WorldSchema = z.object({
     h: z.number().int().positive(),
   }),
   districts: z.array(DistrictSchema).min(1),
-  // Visual-only paths between districts, planned by A* over the walkable mask
-  // at generation time. Each entry is a contiguous tile sequence (start→goal).
-  // Locked at first generation alongside districts.
-  roads: z.array(z.array(TilePosSchema)),
+  // Road network produced by the BSP city-carver. `class` lets the renderer
+  // pick a visual width: `arterial` roads are the first cuts (wider, darker),
+  // `street` everything else. `tiles` is a contiguous run of tile positions;
+  // overlapping strips are allowed (an arterial and a street meeting at an
+  // intersection share tiles).
+  roads: z.array(
+    z.object({
+      class: z.enum(['arterial', 'street']),
+      tiles: z.array(TilePosSchema),
+    }),
+  ),
   objects: z.array(WorldObjectSchema),
   agents: z.array(AgentSchema),
   // Decorative road-side props. Default [] keeps older worlds deserializable.
@@ -239,6 +255,8 @@ export const WorldSchema = z.object({
 });
 
 export type World = z.infer<typeof WorldSchema>;
+export type Road = World['roads'][number];
+export type RoadClass = Road['class'];
 
 // ============================================================================
 // Generation job progress — emitted over SSE to the generating page

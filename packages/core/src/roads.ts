@@ -1,17 +1,12 @@
-import type { District, TilePos } from '@gitcolony/schema';
-import { type GridMask, type GridSize, getBit, inBounds } from './grid.js';
+import type { TilePos } from '@gitcolony/schema';
+import { type GridMask, getBit, inBounds } from './grid.js';
 
 // ============================================================================
-// Road routing — deterministic A* over the walkable mask between district
-// centers. Roads themselves are visual-only (they don't block movement) but
-// are frozen into the World alongside districts so the renderer and sim can
-// both consume the same paths.
-//
-// Pairing strategy (MVP, per docs/layout-districts.md §5):
-//   - every non-outskirts district connects to its 1-nearest non-outskirts
-//     neighbor by euclidean distance (ties broken by district id);
-//   - every non-outskirts district connects to the outskirts district.
-// Outskirts guarantees the graph is connected without requiring full MST.
+// A* over the walkable mask. Used by the sim for agent navigation. The city's
+// road network itself is no longer planned here — the BSP carver in
+// `cityBsp.ts` emits road strips directly alongside block rectangles. This
+// module now exists solely to provide pathfinding for agents and anything
+// else that needs a shortest path between two tiles.
 // ============================================================================
 
 // 4-neighbor order fixes deterministic expansion. Matches "by (y, x, dir)"
@@ -106,8 +101,8 @@ export function aStar(
       const stepBase = roadMask && getBit(roadMask, nx, ny) === 1 ? 1 : OFFROAD_COST;
       // Road tiles cost exactly 1 when a mask is supplied so the heuristic
       // stays admissible (manhattan ≤ true cost). When no roadMask is
-      // given we fall back to flat cost 1 — preserves the original
-      // planRoads semantics where roads are computed before any mask exists.
+      // given we fall back to flat cost 1 so the planner keeps behaving
+      // like a plain shortest-path search.
       const newG = cur.g + (roadMask ? stepBase : 1) + turn;
       const nKey = encode(nx, ny, d);
       if (newG < (gScore.get(nKey) ?? Infinity)) {
@@ -147,67 +142,3 @@ function reconstruct(
   return path;
 }
 
-// ----------------------------------------------------------------------------
-// Public: plan the road network for a set of districts.
-//
-// `rng` is accepted for signature symmetry with other world-gen steps but is
-// not consumed — pairing and A* are both fully deterministic given the input
-// districts and mask. Same inputs → same output.
-// ----------------------------------------------------------------------------
-
-export interface PlanRoadsInput {
-  districts: readonly District[];
-  occupied: GridMask;
-  grid: GridSize;
-  rng: () => number;
-}
-
-export function planRoads({
-  districts,
-  occupied,
-}: PlanRoadsInput): TilePos[][] {
-  const outskirts = districts.find((d) => d.isOutskirts);
-  const nonOutskirts = districts.filter((d) => !d.isOutskirts);
-  if (nonOutskirts.length === 0) return [];
-
-  const pairs = new Set<string>();
-  const pairKey = (a: District, b: District): string =>
-    a.id < b.id ? `${a.id}|${b.id}` : `${b.id}|${a.id}`;
-
-  // 1-nearest non-outskirts neighbor per district (euclidean², ties by id).
-  const sortedDistricts = [...nonOutskirts].sort((a, b) =>
-    a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
-  );
-  for (const a of sortedDistricts) {
-    let best: District | null = null;
-    let bestD = Infinity;
-    for (const b of sortedDistricts) {
-      if (b.id === a.id) continue;
-      const dx = a.center.x - b.center.x;
-      const dy = a.center.y - b.center.y;
-      const dsq = dx * dx + dy * dy;
-      if (dsq < bestD || (dsq === bestD && best !== null && b.id < best.id)) {
-        bestD = dsq;
-        best = b;
-      }
-    }
-    if (best) pairs.add(pairKey(a, best));
-  }
-
-  // Connect every non-outskirts district to outskirts — guarantees connectivity.
-  if (outskirts) {
-    for (const a of sortedDistricts) pairs.add(pairKey(a, outskirts));
-  }
-
-  const byId = new Map(districts.map((d) => [d.id, d]));
-  const roads: TilePos[][] = [];
-  for (const key of Array.from(pairs).sort()) {
-    const [aId, bId] = key.split('|');
-    const a = byId.get(aId!);
-    const b = byId.get(bId!);
-    if (!a || !b) continue;
-    const path = aStar(occupied, a.center, b.center);
-    if (path) roads.push(path);
-  }
-  return roads;
-}

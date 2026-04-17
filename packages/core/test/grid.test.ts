@@ -71,18 +71,34 @@ describe('districtBBox', () => {
     id: 'd-x',
     name: 'x',
     isOutskirts: false,
+    isGraveyard: false,
     center: { x: 8, y: 8 },
-    sizeInTiles: { w: 6, h: 4 },
+    blocks: [{ x0: 5, y0: 6, x1: 10, y1: 9 }],
     theme: 'generic',
   };
 
-  test('bbox centered on district.center', () => {
+  test('bbox matches the sole block rectangle', () => {
     const b = districtBBox(d, GRID);
     expect(b).toEqual({ x0: 5, y0: 6, x1: 10, y1: 9 });
   });
 
+  test('bbox unions multiple blocks (L-shape districts)', () => {
+    const multi: District = {
+      ...d,
+      blocks: [
+        { x0: 2, y0: 2, x1: 5, y1: 5 },
+        { x0: 6, y0: 4, x1: 9, y1: 7 },
+      ],
+    };
+    const b = districtBBox(multi, GRID);
+    expect(b).toEqual({ x0: 2, y0: 2, x1: 9, y1: 7 });
+  });
+
   test('bbox clamps to grid edges', () => {
-    const b = districtBBox({ ...d, center: { x: 1, y: 1 } }, GRID);
+    const b = districtBBox(
+      { ...d, blocks: [{ x0: -3, y0: -3, x1: 2, y1: 2 }] },
+      GRID,
+    );
     expect(b.x0).toBe(0);
     expect(b.y0).toBe(0);
   });

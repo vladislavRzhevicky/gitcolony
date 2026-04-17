@@ -2,22 +2,21 @@
 // Asset registry — maps abstract variant keys produced by @gitcolony/core
 // onto concrete GLB paths served from /static/models.
 //
-// The variant strings (e.g. 'workshop-01', 'tree-02') are contract surface
-// between the generator and the renderer — invariant #2/#4 require them to
-// stay stable across releases. The mapping below is *rendering-side only*:
-// swapping models here doesn't invalidate existing worlds.
+// The variant strings are contract surface between the generator and the
+// renderer. Picking is deterministic: for a given variant we always
+// resolve to the same GLB path.
 //
-// Picking is deterministic: for a given (variant, stableKey) we always
-// return the same GLB path. stableKey is typically commitSha (for objects)
-// or agent.id (for agents) so the same colony always looks the same.
+// Visual source: Kenney's Starter Kit City Builder + City Kit Suburban +
+// City Kit Commercial. Each kit ships its own colormap.png; the sibling
+// Textures/ folder next to each GLB directory under /static/models is
+// installed by scripts/copy-assets.sh.
 // ============================================================================
 
 import type { WorldObject, Agent, SceneryProp } from '@gitcolony/schema';
 
 // ----------------------------------------------------------------------------
-// Deterministic, non-cryptographic hash. FNV-1a 32-bit is plenty for picking
-// an index into a small candidate list and keeps us free of node:crypto
-// (which can't reach the client bundle anyway — see sim.svelte.ts).
+// Deterministic, non-cryptographic hash for stable per-instance picks when
+// the variant key alone isn't enough. FNV-1a 32-bit, no node:crypto.
 // ----------------------------------------------------------------------------
 function fnv1a(s: string): number {
   let h = 0x811c9dc5;
@@ -35,231 +34,151 @@ function pickFrom<T>(candidates: readonly T[], key: string): T {
 }
 
 // ----------------------------------------------------------------------------
-// Building pools — one per pack. Keep file lists in sync with
-// scripts/copy-assets.sh. Files not listed here are still copied to disk but
-// simply never referenced; that's fine.
+// Buildings — five density tiers, one subdirectory per tier. Variant keys
+// come in as `<prefix>-<letter>`, e.g. `floor-1-a`, `skyscraper-c`. Unknown
+// prefixes fall back to a deterministic rural pick so legacy worlds still
+// render something.
 // ----------------------------------------------------------------------------
-const SUBURBAN = [
-  'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s',
-].map((l) => `/models/buildings/suburban/building-type-${l}.glb`);
 
-const COMMERCIAL = [
-  'a','b','c','d','e','f','g','h','i','j','k','l','m','n',
-].map((l) => `/models/buildings/commercial/building-${l}.glb`);
+const BUILDING_DIR = {
+  rural: '/models/buildings/rural',
+  'floor-1': '/models/buildings/floor-1',
+  'floor-2': '/models/buildings/floor-2',
+  'floor-3': '/models/buildings/floor-3',
+  skyscraper: '/models/buildings/skyscraper',
+} as const;
 
-const COMMERCIAL_SKYSCRAPERS = [
-  'a','b','c','d','e',
-].map((l) => `/models/buildings/commercial/building-skyscraper-${l}.glb`);
+type BuildingPrefix = keyof typeof BUILDING_DIR;
 
-const INDUSTRIAL = [
-  'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t',
-].map((l) => `/models/buildings/industrial/building-${l}.glb`);
-
-const LOW_DETAIL = [
-  'a','b','c','d','e','f','g','h','i','j','k','l','m','n',
-].map((l) => `/models/buildings/low-detail/low-detail-building-${l}.glb`);
-
-// variant prefix (before '-') → candidate pool. Prefix matching keeps the
-// registry resilient: core can add 'workshop-03' later without touching
-// the renderer as long as the prefix is known here.
-//
-// Prefixes not listed fall through to the 'unknown' pool.
-const BUILDING_POOL_BY_PREFIX: Record<string, readonly string[]> = {
-  // Primary contract with world-gen (volume-unlocked kits).
-  suburban: SUBURBAN,
-  commercial: [...COMMERCIAL, ...COMMERCIAL_SKYSCRAPERS],
-  industrial: INDUSTRIAL,
-
-  // Legacy prefixes — retained so worlds generated before the kit refactor
-  // still render. Semantic-driven naming is deprecated; new variants always
-  // use a kit prefix.
-  workshop: SUBURBAN,
-  clinic: INDUSTRIAL,
-  repair: INDUSTRIAL,
-  hall: [...COMMERCIAL, ...COMMERCIAL_SKYSCRAPERS],
-  library: SUBURBAN,
-  archive: SUBURBAN,
-  tower: INDUSTRIAL,
-  storage: LOW_DETAIL,
-  house: SUBURBAN,
+// Per-tier pool, ordered to match the letters assigned by world-gen.
+// Consumers pass in `rural-a`, `floor-1-c`, etc.; we look up the tier
+// here and drop the letter onto the right filename.
+const BUILDING_FILENAMES: Readonly<Record<BuildingPrefix, readonly string[]>> = {
+  // starter kit: `building-garage` + `building-small-a..d`. Emit as a/b/c/d/e.
+  rural: [
+    'building-garage',
+    'building-small-a',
+    'building-small-b',
+    'building-small-c',
+    'building-small-d',
+  ],
+  // suburban a..j (shortest half of the pack)
+  'floor-1': 'abcdefghij'.split('').map((l) => `building-type-${l}`),
+  // suburban k..u (taller half)
+  'floor-2': 'abcdefghijk'.split('').map((_, i) =>
+    `building-type-${'klmnopqrstu'.charAt(i)}`,
+  ),
+  // commercial mid-rise a..n
+  'floor-3': 'abcdefghijklmn'.split('').map((l) => `building-${l}`),
+  // commercial skyscraper a..e
+  skyscraper: 'abcde'.split('').map((l) => `building-skyscraper-${l}`),
 };
 
+function parsePrefix(variant: string): { prefix: BuildingPrefix; letter: string } | null {
+  // `floor-1-a` has two hyphens inside the prefix — match the longest
+  // known prefix first so we don't mis-split.
+  for (const prefix of Object.keys(BUILDING_DIR) as BuildingPrefix[]) {
+    if (variant === prefix) return { prefix, letter: 'a' };
+    if (variant.startsWith(`${prefix}-`)) {
+      return { prefix, letter: variant.slice(prefix.length + 1) };
+    }
+  }
+  return null;
+}
+
 export function buildingModel(obj: WorldObject): string {
-  const prefix = obj.variant.split('-')[0] ?? 'house';
-  const pool = BUILDING_POOL_BY_PREFIX[prefix] ?? SUBURBAN;
-  return pickFrom(pool, `${obj.commitSha}:${obj.variant}`);
+  const parsed = parsePrefix(obj.variant);
+  if (!parsed) {
+    // Legacy / unknown: deterministic rural pick so the scene still renders.
+    const pool = BUILDING_FILENAMES.rural;
+    return `${BUILDING_DIR.rural}/${pickFrom(pool, obj.variant)}.glb`;
+  }
+  const pool = BUILDING_FILENAMES[parsed.prefix];
+  const letterIdx = parsed.letter.charCodeAt(0) - 'a'.charCodeAt(0);
+  const name =
+    letterIdx >= 0 && letterIdx < pool.length
+      ? pool[letterIdx]!
+      : pool[fnv1a(obj.variant) % pool.length]!;
+  return `${BUILDING_DIR[parsed.prefix]}/${name}.glb`;
 }
 
 // ----------------------------------------------------------------------------
-// Decor: tier-C and tier-D. Variants come from world-gen's DECOR_C/DECOR_D
-// tables — prefixes: tree, bush, lamp, rock, crate, grass, flower, pebbles.
+// Decor / infill — the district planner emits one scenery tile per infill
+// slot. Variant strings map 1:1 to the right GLB.
+//
+// Variants emitted by the new generator:
+//   - 'pavement'            → plain pavement square (between buildings)
+//   - 'pavement-fountain'   → pavement with a central fountain (plaza)
+//   - 'grass'               → bare grass pad (forest)
+//   - 'grass-trees'         → grass with small trees (forest)
+//   - 'grass-trees-tall'    → grass with tall trees (forest)
 // ----------------------------------------------------------------------------
-const TREES = [
-  'tree_oak','tree_default','tree_detailed','tree_fat',
-  'tree_pineDefaultA','tree_pineDefaultB','tree_pineRoundA','tree_pineRoundC',
-].map((n) => `/models/nature/${n}.glb`);
-
-const BUSHES = [
-  'tree_pineSmallA','tree_pineSmallB','grass_leafsLarge',
-].map((n) => `/models/nature/${n}.glb`);
-
-const GRASS_TUFTS = [
-  'grass','grass_large','grass_leafs','grass_leafsLarge',
-].map((n) => `/models/nature/${n}.glb`);
-
-const FLOWERS = [
-  'flower_purpleA','flower_redA','flower_yellowA',
-].map((n) => `/models/nature/${n}.glb`);
-
-const ROCKS = [
-  'cliff_block_rock','cliff_rock',
-].map((n) => `/models/nature/${n}.glb`);
-
-const LAMPS = [
-  '/models/roads/light-square.glb',
-  '/models/roads/light-curved.glb',
-  '/models/props/graveyard/lightpost-single.glb',
-  '/models/props/fantasy/lantern.glb',
-];
-
-const CRATES = [
-  '/models/props/car/box.glb',
-  '/models/props/car/cone.glb',
-];
-
-// City Kit Roads construction sub-kit — barrier / cone / light props that
-// mark work-in-progress commits (future: open pull requests) as small
-// construction sites scattered among the regular districts.
-const CONSTRUCTION = [
-  '/models/props/construction/construction-barrier.glb',
-  '/models/props/construction/construction-cone.glb',
-  '/models/props/construction/construction-light.glb',
-];
-
-// Graveyard Kit — tombstones, crosses, coffins. Used by the memorial
-// district for revert commits (and closed-unmerged PRs once the ingestion
-// pipeline supplies them).
-const GRAVES = [
-  '/models/props/graveyard/gravestone-bevel.glb',
-  '/models/props/graveyard/gravestone-broken.glb',
-  '/models/props/graveyard/gravestone-cross.glb',
-  '/models/props/graveyard/gravestone-cross-large.glb',
-  '/models/props/graveyard/gravestone-debris.glb',
-  '/models/props/graveyard/gravestone-decorative.glb',
-  '/models/props/graveyard/gravestone-round.glb',
-  '/models/props/graveyard/gravestone-wide.glb',
-  '/models/props/graveyard/gravestone-roof.glb',
-  '/models/props/graveyard/grave.glb',
-  '/models/props/graveyard/grave-border.glb',
-  '/models/props/graveyard/coffin.glb',
-  '/models/props/graveyard/cross-wood.glb',
-];
 
 export interface DecorModel {
   path: string;
-  // Suggested Y offset in world units — some assets (tufts, flowers) sit
-  // flush with the ground; others (lamps, trees) need no offset because
-  // their origin is at the base.
+  // Y offset in world units — starter-kit tiles all sit flush at Y=0.
   yOffset: number;
-  // Uniform scale — Kenney packs ship at varying scales; these values
-  // were eyeballed to sit right on our TILE_SIZE=1 grid.
+  // Uniform scale. Starter-kit tiles are 1 unit per tile; TILE_SIZE is 1.
   scale: number;
 }
 
-export function decorModel(obj: WorldObject): DecorModel | null {
-  const prefix = obj.variant.split('-')[0] ?? '';
-  const key = `${obj.commitSha}:${obj.variant}`;
-  switch (prefix) {
-    case 'tree':
-      return { path: pickFrom(TREES, key), yOffset: 0, scale: 0.6 };
-    case 'bush':
-      return { path: pickFrom(BUSHES, key), yOffset: 0, scale: 0.55 };
+const PAVEMENT_PATH = '/models/pavement/pavement.glb';
+const FOUNTAIN_PATH = '/models/pavement/pavement-fountain.glb';
+const GRASS_PATH = '/models/nature/grass.glb';
+const GRASS_TREES_PATH = '/models/nature/grass-trees.glb';
+const GRASS_TREES_TALL_PATH = '/models/nature/grass-trees-tall.glb';
+
+function decorFor(variant: string): DecorModel | null {
+  switch (variant) {
+    case 'pavement':
+      return { path: PAVEMENT_PATH, yOffset: 0, scale: 1 };
+    case 'pavement-fountain':
+    case 'fountain':
+      return { path: FOUNTAIN_PATH, yOffset: 0, scale: 1 };
     case 'grass':
-      return { path: pickFrom(GRASS_TUFTS, key), yOffset: 0, scale: 0.8 };
-    case 'flower':
-      return { path: pickFrom(FLOWERS, key), yOffset: 0, scale: 0.9 };
-    case 'pebbles':
-      return { path: pickFrom(ROCKS, key), yOffset: 0, scale: 0.25 };
-    case 'rock':
-      return { path: pickFrom(ROCKS, key), yOffset: 0, scale: 0.45 };
-    case 'lamp':
-      return { path: pickFrom(LAMPS, key), yOffset: 0, scale: 0.5 };
-    case 'crate':
-      return { path: pickFrom(CRATES, key), yOffset: 0, scale: 0.4 };
-    case 'grave':
-      return { path: pickFrom(GRAVES, key), yOffset: 0, scale: 0.7 };
-    case 'construction':
-      return { path: pickFrom(CONSTRUCTION, key), yOffset: 0, scale: 0.55 };
+      return { path: GRASS_PATH, yOffset: 0, scale: 1 };
+    case 'grass-trees':
+    case 'tree':
+      return { path: GRASS_TREES_PATH, yOffset: 0, scale: 1 };
+    case 'grass-trees-tall':
+    case 'tree-tall':
+      return { path: GRASS_TREES_TALL_PATH, yOffset: 0, scale: 1 };
     default:
       return null;
   }
 }
 
-// ----------------------------------------------------------------------------
-// Scenery props — road-side trees the layout planner plants. SceneryProp.id
-// is stable ('tree-x-y') so we hash that to keep the species consistent
-// across renders.
-// ----------------------------------------------------------------------------
-const GRASS_TUFT_POOL = [
-  '/models/nature/grass.glb',
-  '/models/nature/grass_large.glb',
-  '/models/nature/grass_leafs.glb',
-  '/models/nature/grass_leafsLarge.glb',
-];
-
-const FLOWER_POOL = [
-  '/models/nature/flower_purpleA.glb',
-  '/models/nature/flower_redA.glb',
-  '/models/nature/flower_yellowA.glb',
-];
-
-// Graveyard corner markers — cross-column pillar on each bbox corner.
-const CROSS_COLUMN_PATH = '/models/props/graveyard/cross-column.glb';
+export function decorModel(obj: WorldObject): DecorModel | null {
+  return decorFor(obj.variant);
+}
 
 export function sceneryModel(prop: SceneryProp): DecorModel {
-  if (prop.variant === 'cross-column') {
-    return { path: CROSS_COLUMN_PATH, yOffset: 0, scale: 1 };
-  }
-  const prefix = prop.variant.split('-')[0] ?? 'tree';
-  switch (prefix) {
-    case 'grass':
-      // grass-tuft / grass-tuft-large / grass-leafs all draw from the same
-      // Kenney grass pool; variant subtype is cosmetic noise so the field
-      // doesn't read as a regular tiling.
-      return { path: pickFrom(GRASS_TUFT_POOL, prop.id), yOffset: 0, scale: 0.7 };
-    case 'flower':
-      return { path: pickFrom(FLOWER_POOL, prop.id), yOffset: 0, scale: 0.8 };
-    case 'tree':
-    default:
-      return { path: pickFrom(TREES, prop.id), yOffset: 0, scale: 0.55 };
-  }
+  // Unknown scenery variants fall back to a bare grass tile so retired
+  // variant strings still render.
+  return decorFor(prop.variant) ?? { path: GRASS_PATH, yOffset: 0, scale: 1 };
 }
 
 // ----------------------------------------------------------------------------
-// Agents — Mini Characters, male + female variants a..f. Unlike Blocky
-// Characters each model shares one colormap.png, so we don't need per-file
-// texture hookups.
+// Agents — Mini Characters, male + female variants a..f. The starter kit
+// ships no characters, so this external pack stays.
 // ----------------------------------------------------------------------------
 const CHARACTERS = (['female', 'male'] as const).flatMap((sex) =>
-  ['a','b','c','d','e','f'].map((l) => `/models/characters/character-${sex}-${l}.glb`),
+  ['a', 'b', 'c', 'd', 'e', 'f'].map((l) => `/models/characters/character-${sex}-${l}.glb`),
 );
 
-const GHOST_PATH = '/models/props/graveyard/character-ghost.glb';
-
 export function agentModel(agent: Agent): string {
-  if (agent.role === 'ghost') return GHOST_PATH;
   return pickFrom(CHARACTERS, agent.id);
 }
 
 // ----------------------------------------------------------------------------
-// Road tiles — picked in Roads.svelte based on 4-neighbor mask, not here.
-// Exported as a constant path map so the component has a single source.
+// Road tiles — picked in Roads.svelte based on 4-neighbor mask. Sourced
+// from Kenney's Starter Kit City Builder pack.
 // ----------------------------------------------------------------------------
 export const ROAD_MODELS = {
   straight: '/models/roads/road-straight.glb',
-  bend: '/models/roads/road-bend.glb',
-  intersection: '/models/roads/road-intersection.glb', // 3-way T
-  crossroad: '/models/roads/road-crossroad.glb',       // 4-way
-  end: '/models/roads/road-end.glb',
-  square: '/models/roads/road-square.glb',             // isolated tile
+  straightLit: '/models/roads/road-straight-lightposts.glb',
+  corner: '/models/roads/road-corner.glb',
+  split: '/models/roads/road-intersection.glb',
+  intersection: '/models/roads/road-split.glb',
+  deadEnd: '/models/pavement/pavement-fountain.glb',
 } as const;

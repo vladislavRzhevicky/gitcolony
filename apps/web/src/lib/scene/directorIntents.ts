@@ -15,6 +15,7 @@
 import type { Agent, District, TilePos, World } from '@gitcolony/schema';
 import { aStar } from '@gitcolony/core/sim';
 import type { GridMask } from '@gitcolony/core/sim';
+import { tileInDistrict } from '@gitcolony/core/grid';
 import type {
   AgentIntent,
   AgentIntentFetcher,
@@ -103,18 +104,13 @@ export class IntentRunner {
       );
     }
 
-    // Precompute district bboxes for tile lookup. Tiny grids, n is small.
+    // Tile→district lookup via the shared `tileInDistrict` helper, which
+    // walks each district's `blocks: Rect[]` — so an L-shape district
+    // attributes correctly instead of being a bounding-box over-claim.
     const districts = o.world.districts;
     this.tileToDistrict = (pos) => {
       for (const d of districts) {
-        const halfW = Math.floor(d.sizeInTiles.w / 2);
-        const halfH = Math.floor(d.sizeInTiles.h / 2);
-        if (
-          pos.x >= d.center.x - halfW && pos.x <= d.center.x + halfW &&
-          pos.y >= d.center.y - halfH && pos.y <= d.center.y + halfH
-        ) {
-          return d.id;
-        }
+        if (tileInDistrict(d, pos)) return d.id;
       }
       return null;
     };

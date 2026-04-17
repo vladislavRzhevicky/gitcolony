@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
-# Selectively copy GLB models from the Kenney packs in ./textures/ into
-# apps/web/static/models/ so SvelteKit serves them as static assets.
+# Copy GLB assets from the Kenney packs in ./textures/ plus the
+# Starter-Kit-City-Builder clone into apps/web/static/models/.
 #
-# Kenney City/Graveyard/Fantasy/Car/Cube/BlockyCharacters GLBs reference an
-# external 'Textures/<name>.png' *relative to the GLB file*. Every target
-# directory that holds GLBs from a given pack therefore needs a sibling
-# Textures/ folder with that pack's texture atlas. Each pack ships its own
-# atlas (same filename, different contents) — so directories that mix packs
-# must be split, or one pack's GLBs will pick up another pack's palette.
+# Visual source of truth is Kenney's Starter Kit City Builder (single
+# shared colormap.png). We pull three things from outside it:
+#   1. Mini Characters — agents; the starter kit has no characters.
+#   2. Hexagon Kit      — island terrain surround around the square city.
 #
-# Nature Kit is self-contained: textures are embedded in the .glb, no
-# sibling Textures/ folder needed.
+# Every GLB references an external 'Textures/<name>.png' relative to its
+# own folder, so each destination directory that mixes packs must have
+# the right sibling Textures/ installed. Starter Kit + its sibling packs
+# here each ship one colormap.png.
 #
 # Idempotent: safe to re-run.
 
@@ -19,10 +19,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/textures"
+STARTER="$ROOT/Starter-Kit-City-Builder"
 DST="$ROOT/apps/web/static/models"
 
 rm -rf "$DST"
-mkdir -p "$DST"/{buildings/{suburban,commercial,industrial,low-detail},roads,nature,characters,pets,cars,props/{car,graveyard,fantasy,construction},terrain}
+mkdir -p "$DST"/{buildings,roads,nature,pavement,characters,terrain}
 
 copy() {
   local src="$1"
@@ -34,8 +35,6 @@ copy() {
   cp "$src" "$dst"
 }
 
-# Copy the 'Textures' subfolder from a Kenney pack next to a destination
-# folder, so embedded GLTF texture references resolve.
 install_textures() {
   local pack_textures="$1"
   local dst_dir="$2"
@@ -48,62 +47,101 @@ install_textures() {
 }
 
 # ---------------------------------------------------------------------------
-# Buildings — four pools, picked by semanticType in the registry.
+# Starter Kit City Builder — roads, buildings, nature, pavement.
+# Everything in this pack shares a single colormap.png, so we install the
+# same Textures/ folder next to every destination folder that holds its
+# GLBs. This is the whole visual voice of the city.
 # ---------------------------------------------------------------------------
-SUB_SRC="$SRC/City Kit Suburban/Models/GLB format"
-for letter in a b c d e f g h i j k l m n o p q r s; do
-  copy "$SUB_SRC/building-type-$letter.glb" "$DST/buildings/suburban/"
-done
-install_textures "$SUB_SRC/Textures" "$DST/buildings/suburban"
+SK_MODELS="$STARTER/models"
+SK_TEXTURES="$SK_MODELS/Textures"
 
+# Roads come from the Starter Kit City Builder — lampposts are baked into a
+# straight variant (road-straight-lightposts.glb) rather than living as a
+# separate prop, so Roads.svelte just picks that variant every Nth straight
+# instead of spawning a second GLB. Shares the starter kit colormap.
+#
+# Tile mapping in assets.ts -> this filename:
+#   straight     -> road-straight.glb
+#   straightLit  -> road-straight-lightposts.glb
+#   corner       -> road-corner.glb
+#   split        -> road-intersection.glb   (T-junction — starter-kit name lies)
+#   intersection -> road-split.glb          (4-way crossroad — see above)
+for name in road-straight road-straight-lightposts road-corner road-intersection road-split; do
+  copy "$SK_MODELS/$name.glb" "$DST/roads/"
+done
+install_textures "$SK_TEXTURES" "$DST/roads"
+
+# Pavement — plain pad and pad-with-fountain centerpiece. The fountain is
+# dropped on park centers and large district pads by the world-gen decor
+# pass; plain pavement is a placement hint for future variant work.
+for name in pavement pavement-fountain; do
+  copy "$SK_MODELS/$name.glb" "$DST/pavement/"
+done
+install_textures "$SK_TEXTURES" "$DST/pavement"
+
+# Buildings — five density tiers driven by the aggregated house-point
+# generator (see @gitcolony/core/houseCounts). Each tier picks from a
+# distinct pool so the skyline reads as a gradient village → town →
+# skyscraper core rather than a uniform suburban sprawl.
+#
+#   rural     → Starter Kit small cottages + garage (5 variants)
+#   floor-1   → City Kit Suburban, shortest half (types a..j)
+#   floor-2   → City Kit Suburban, tallest half (types k..u)
+#   floor-3   → City Kit Commercial mid-rise offices (types a..n)
+#   skyscraper→ City Kit Commercial skyscrapers (types a..e)
+#
+# Each pack ships its own colormap.png, so they live in sibling
+# subdirectories with their own Textures/ folders; assets.ts maps variant
+# keys onto the right subdirectory.
+mkdir -p "$DST/buildings/rural" "$DST/buildings/floor-1" \
+         "$DST/buildings/floor-2" "$DST/buildings/floor-3" \
+         "$DST/buildings/skyscraper"
+
+# rural — starter kit ships 4 small cottages + the garage; all share the
+# starter-kit colormap.
+for name in building-garage building-small-a building-small-b building-small-c building-small-d; do
+  copy "$SK_MODELS/$name.glb" "$DST/buildings/rural/"
+done
+install_textures "$SK_TEXTURES" "$DST/buildings/rural"
+
+# suburban → split into 1-floor (shorter) and 2-floor (taller) halves.
+# Both halves share the same City Kit Suburban colormap, so we install
+# it into both destination folders.
+SUB_SRC="$SRC/City Kit Suburban/Models/GLB format"
+for letter in a b c d e f g h i j; do
+  copy "$SUB_SRC/building-type-$letter.glb" "$DST/buildings/floor-1/"
+done
+install_textures "$SUB_SRC/Textures" "$DST/buildings/floor-1"
+
+for letter in k l m n o p q r s t u; do
+  copy "$SUB_SRC/building-type-$letter.glb" "$DST/buildings/floor-2/"
+done
+install_textures "$SUB_SRC/Textures" "$DST/buildings/floor-2"
+
+# commercial mid-rise + skyscrapers, same pack, one shared colormap
+# installed into both destinations.
 COM_SRC="$SRC/City Kit Commercial 2.1/Models/GLB format"
 for letter in a b c d e f g h i j k l m n; do
-  copy "$COM_SRC/building-$letter.glb" "$DST/buildings/commercial/"
+  copy "$COM_SRC/building-$letter.glb" "$DST/buildings/floor-3/"
 done
+install_textures "$COM_SRC/Textures" "$DST/buildings/floor-3"
+
 for letter in a b c d e; do
-  copy "$COM_SRC/building-skyscraper-$letter.glb" "$DST/buildings/commercial/"
+  copy "$COM_SRC/building-skyscraper-$letter.glb" "$DST/buildings/skyscraper/"
 done
-install_textures "$COM_SRC/Textures" "$DST/buildings/commercial"
+install_textures "$COM_SRC/Textures" "$DST/buildings/skyscraper"
 
-# low-detail buildings live in the Commercial pack too, so they share the
-# same colormap — but we keep them in their own folder for path clarity.
-for letter in a b c d e f g h i j k l m n; do
-  copy "$COM_SRC/low-detail-building-$letter.glb" "$DST/buildings/low-detail/"
+# Nature — grass pad, grass-with-trees, grass-with-tall-trees. Used both
+# by decor placement and park scenery fill.
+for name in grass grass-trees grass-trees-tall; do
+  copy "$SK_MODELS/$name.glb" "$DST/nature/"
 done
-install_textures "$COM_SRC/Textures" "$DST/buildings/low-detail"
-
-IND_SRC="$SRC/City Kit Industrial 1.0/Models/GLB format"
-for letter in a b c d e f g h i j k l m n o p q r s t; do
-  copy "$IND_SRC/building-$letter.glb" "$DST/buildings/industrial/"
-done
-install_textures "$IND_SRC/Textures" "$DST/buildings/industrial"
+install_textures "$SK_TEXTURES" "$DST/nature"
 
 # ---------------------------------------------------------------------------
-# Road tiles + street lights — all from City Kit Roads, one colormap.
-# ---------------------------------------------------------------------------
-ROAD_SRC="$SRC/City Kit Roads/Models/GLB format"
-for name in road-straight road-bend road-crossroad road-intersection road-end road-square light-square light-curved; do
-  copy "$ROAD_SRC/$name.glb" "$DST/roads/"
-done
-install_textures "$ROAD_SRC/Textures" "$DST/roads"
-
-# ---------------------------------------------------------------------------
-# Nature — textures are embedded in the .glb, nothing else to copy.
-# ---------------------------------------------------------------------------
-NATURE_SRC="$SRC/Nature Kit/Models/GLTF format"
-for name in \
-  tree_oak tree_default tree_detailed tree_fat \
-  tree_pineDefaultA tree_pineDefaultB tree_pineRoundA tree_pineRoundC \
-  tree_pineSmallA tree_pineSmallB \
-  grass grass_large grass_leafs grass_leafsLarge \
-  flower_purpleA flower_redA flower_yellowA \
-  cliff_block_rock cliff_rock; do
-  copy "$NATURE_SRC/$name.glb" "$DST/nature/"
-done
-
-# ---------------------------------------------------------------------------
-# Characters — Mini Characters pack, male + female a..f. One shared
-# colormap.png for the whole pack, so a single install_textures is enough.
+# Mini Characters — agents. The starter kit ships no characters so we keep
+# this one external pack. It has its own colormap.png, different from the
+# starter kit's, which is why we install it in the characters/ folder only.
 # ---------------------------------------------------------------------------
 CHAR_SRC="$SRC/Mini Characters/Models/GLB format"
 for sex in female male; do
@@ -114,79 +152,15 @@ done
 install_textures "$CHAR_SRC/Textures" "$DST/characters"
 
 # ---------------------------------------------------------------------------
-# Pets — Cube Pets shortlist.
-# ---------------------------------------------------------------------------
-PET_SRC="$SRC/Cube Pets 1.0/Models/GLB format"
-for name in bunny cat dog deer fox bee chick parrot; do
-  copy "$PET_SRC/animal-$name.glb" "$DST/pets/"
-done
-install_textures "$PET_SRC/Textures" "$DST/pets"
-
-# ---------------------------------------------------------------------------
-# Cars — shortlist from Car Kit.
-# ---------------------------------------------------------------------------
-CAR_SRC="$SRC/Car Kit/Models/GLB format"
-for name in sedan taxi hatchback-sports van suv delivery; do
-  copy "$CAR_SRC/$name.glb" "$DST/cars/"
-done
-install_textures "$CAR_SRC/Textures" "$DST/cars"
-
-# ---------------------------------------------------------------------------
-# Props — split by pack because each pack ships its own colormap.
-# ---------------------------------------------------------------------------
-copy "$CAR_SRC/box.glb"  "$DST/props/car/"
-copy "$CAR_SRC/cone.glb" "$DST/props/car/"
-install_textures "$CAR_SRC/Textures" "$DST/props/car"
-
-GRAVE_SRC="$SRC/Graveyard Kit 5.0/Models/GLB format"
-# Tombstones + funeral props for the Graveyard district (closed-PR memorial).
-for name in \
-  gravestone-bevel gravestone-broken gravestone-cross gravestone-cross-large \
-  gravestone-debris gravestone-decorative gravestone-round gravestone-wide gravestone-roof \
-  grave grave-border \
-  cross cross-wood cross-column \
-  coffin coffin-old \
-  candle candle-multiple \
-  altar-stone altar-wood \
-  bench bench-damaged \
-  fence fence-damaged fence-gate \
-  iron-fence iron-fence-damaged iron-fence-curve iron-fence-bar \
-  iron-fence-border iron-fence-border-column iron-fence-border-curve \
-  iron-fence-border-gate \
-  pillar-small pillar-large pillar-square pillar-obelisk \
-  debris debris-wood \
-  crypt crypt-a crypt-b crypt-small crypt-small-roof \
-  character-ghost \
-  lightpost-single; do
-  copy "$GRAVE_SRC/$name.glb" "$DST/props/graveyard/"
-done
-install_textures "$GRAVE_SRC/Textures" "$DST/props/graveyard"
-
-# ---------------------------------------------------------------------------
-# Construction props — City Kit Roads ships a construction sub-kit (barrier,
-# cone, light). Used to decorate open-PR building sites alongside the WIP
-# structure itself.
-# ---------------------------------------------------------------------------
-for name in construction-barrier construction-cone construction-light; do
-  copy "$ROAD_SRC/$name.glb" "$DST/props/construction/"
-done
-install_textures "$ROAD_SRC/Textures" "$DST/props/construction"
-
-# ---------------------------------------------------------------------------
-# Terrain — Hexagon Kit. Used by Island.svelte to build the island surround
-# around the square city grid (grass / hills / forest / sand / water). One
-# shared colormap.png for the whole pack.
+# Hexagon Kit — island terrain ring around the city. Kept because the
+# starter kit has no terrain hexes. Its own colormap.png (different from
+# the starter kit's) lives next to the terrain folder only.
 # ---------------------------------------------------------------------------
 HEX_SRC="$SRC/Hexagon Kit/Models/GLB format"
 for name in grass grass-forest grass-hill dirt sand sand-rocks stone stone-hill stone-mountain water water-rocks water-island; do
   copy "$HEX_SRC/$name.glb" "$DST/terrain/"
 done
 install_textures "$HEX_SRC/Textures" "$DST/terrain"
-
-FAN_SRC="$SRC/Fantasy Town Kit 2.0/Models/GLB format"
-copy "$FAN_SRC/fountain-round.glb" "$DST/props/fantasy/"
-copy "$FAN_SRC/lantern.glb"        "$DST/props/fantasy/"
-install_textures "$FAN_SRC/Textures" "$DST/props/fantasy"
 
 echo
 echo "Done. Copied models to $DST"

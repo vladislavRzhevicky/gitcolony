@@ -4,7 +4,6 @@ import { db, schema } from '@gitcolony/db';
 import { decryptSecret } from '@gitcolony/crypto';
 import {
   enrichCommitFiles,
-  fetchClosedPullRequests,
   fetchCommits,
 } from '@gitcolony/github';
 import { extendWorld, generateWorld, rankAll } from '@gitcolony/core';
@@ -211,37 +210,7 @@ export async function processGeneration(job: Job<GenerationJobData>) {
       },
     });
 
-    // Closed-unmerged pull requests become tombstones in the graveyard.
-    // Fetched alongside commits and passed to world-gen. On incremental sync
-    // we pass a timestamp cursor so we only pull the newly-closed ones —
-    // generateWorld's placeGraves is already id-idempotent, but the cursor
-    // keeps the GraphQL bill bounded. Fail-soft: if the PR fetch errors
-    // (rate limit, permissions), we log and continue with an empty list so
-    // the commit pipeline still runs.
-    let closedPrs: Awaited<ReturnType<typeof fetchClosedPullRequests>> = [];
-    try {
-      closedPrs = await fetchClosedPullRequests(token, {
-        owner: ownerPart,
-        name: namePart,
-        untilClosedAt: isIncremental ? city.lastSyncedAt?.toISOString() : undefined,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // Fine-grained PATs without `Pull requests: Read` are the common case
-      // here — the repo is readable, PRs aren't. Log at info so we don't
-      // flag an expected scope limitation as a warning on every sync.
-      const isScopeIssue = /Resource not accessible by personal access token/i.test(msg);
-      if (isScopeIssue) {
-        log.info('closed-PR list skipped — token lacks PR scope', { cityId });
-      } else {
-        log.warn('fetchClosedPullRequests failed; continuing without graves', {
-          cityId,
-          error: msg,
-        });
-      }
-    }
-
-    if (commits.length === 0 && closedPrs.length === 0) {
+    if (commits.length === 0) {
       // Nothing new upstream — but a sync attempt still completed, so bump
       // `lastSyncedAt` so the UI's "Synced Nm ago" chip resets. We leave
       // `lastSyncedSha` alone since no new commits were observed.
@@ -321,20 +290,20 @@ export async function processGeneration(job: Job<GenerationJobData>) {
         await report({ phase: 'layout', progress: 55, message: flavor('layout') });
         await report({ phase: 'roads', progress: 60, message: flavor('roads') });
         await report({ phase: 'placing', progress: 65, message: flavor('placing') });
-        world = generateWorld(repo, ranked, closedPrs);
+        world = generateWorld(repo, ranked);
       } else {
         // Sync: layout + roads are immutable (invariant #2), only placing runs.
         const prev = existing.world as World;
         preExistingObjectIds = new Set(prev.objects.map((o) => o.id));
         preExistingAgentIds = new Set(prev.agents.map((a) => a.id));
         await report({ phase: 'placing', progress: 65, message: flavor('placing') });
-        world = extendWorld(prev, ranked, closedPrs, repo.totalCommits);
+        world = extendWorld(prev, ranked, repo.totalCommits);
       }
     } else {
       await report({ phase: 'layout', progress: 55, message: flavor('layout') });
       await report({ phase: 'roads', progress: 60, message: flavor('roads') });
       await report({ phase: 'placing', progress: 65, message: flavor('placing') });
-      world = generateWorld(repo, ranked, closedPrs);
+      world = generateWorld(repo, ranked);
     }
 
     // --- Phase: naming (LLM, fail-soft) -----------------------------------
